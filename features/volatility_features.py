@@ -14,7 +14,7 @@ import pandas as pd
 _DATE_CANDIDATES = ("date", "quote_date", "as_of_date", "timestamp")
 _EXPIRY_CANDIDATES = ("expiration", "expiry", "expiration_date", "exp_date")
 _STRIKE_CANDIDATES = ("strike", "strike_price")
-_SPOT_CANDIDATES = ("underlying_price", "underlying_close", "spot", "close", "price")
+_SPOT_CANDIDATES = ("underlying_price", "underlying_close", "spot")
 _TYPE_CANDIDATES = ("option_type", "type", "right")
 _PRICE_CANDIDATES = ("mid", "mark", "last", "price", "close")
 
@@ -104,15 +104,16 @@ def compute_iv_vs_realized(option_df: pd.DataFrame, earnings_dates: Iterable) ->
         option_rows = df[[c for c in [date_col, expiry_col, strike_col, spot_col, type_col, price_col] if c is not None]].copy()
         option_rows[type_col] = option_rows[type_col].map(_normalize_option_type)
         option_rows[price_col] = pd.to_numeric(option_rows[price_col], errors="coerce")
+        option_rows[spot_col] = pd.to_numeric(option_rows[spot_col], errors="coerce")
 
         if strike_col is None:
             raise ValueError("A strike column is required when call_price/put_price are not provided.")
         if expiry_col is None:
             raise ValueError("An expiration column is required when call_price/put_price are not provided.")
 
-        pivoted = (
+        pivoted_prices = (
             option_rows.pivot_table(
-                index=[date_col, expiry_col, strike_col, spot_col],
+                index=[date_col, expiry_col, strike_col],
                 columns=type_col,
                 values=price_col,
                 aggfunc="mean",
@@ -120,6 +121,11 @@ def compute_iv_vs_realized(option_df: pd.DataFrame, earnings_dates: Iterable) ->
             .reset_index()
             .rename_axis(columns=None)
         )
+        pivoted_spot = (
+            option_rows.groupby([date_col, expiry_col, strike_col], as_index=False)[spot_col]
+            .mean()
+        )
+        pivoted = pivoted_prices.merge(pivoted_spot, on=[date_col, expiry_col, strike_col], how="left")
         if "call" not in pivoted.columns or "put" not in pivoted.columns:
             raise ValueError("Option rows must contain both call and put prices to compute straddle implied move.")
 
