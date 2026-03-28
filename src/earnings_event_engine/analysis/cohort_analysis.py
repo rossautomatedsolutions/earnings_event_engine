@@ -31,6 +31,8 @@ def _bucket_series(
     include_lowest: bool = True,
 ) -> pd.Series:
     numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().sum() == 0:
+        return pd.Series("missing", index=series.index, dtype="object")
 
     if bins is not None:
         if labels is not None and len(labels) != len(bins) - 1:
@@ -49,7 +51,10 @@ def _bucket_series(
         bucketed = pd.qcut(numeric, q=len(quantile_labels), labels=quantile_labels, duplicates="drop")
     except ValueError:
         ranked = numeric.rank(method="first")
-        bucketed = pd.qcut(ranked, q=len(quantile_labels), labels=quantile_labels, duplicates="drop")
+        try:
+            bucketed = pd.qcut(ranked, q=len(quantile_labels), labels=quantile_labels, duplicates="drop")
+        except ValueError:
+            return pd.Series("missing", index=series.index, dtype="object")
 
     return bucketed.astype("object").fillna("missing")
 
@@ -135,8 +140,11 @@ def build_cohort_analysis(
     working["difference_realized_minus_implied"] = (
         working["realized_move_numeric"] - working["implied_move_numeric"]
     )
-    working["hit_realized_gt_implied"] = (
-        working["realized_move_numeric"] > working["implied_move_numeric"]
+    valid_hit_comparison = working["realized_move_numeric"].notna() & working["implied_move_numeric"].notna()
+    working["hit_realized_gt_implied"] = np.where(
+        valid_hit_comparison,
+        working["realized_move_numeric"] > working["implied_move_numeric"],
+        np.nan,
     ).astype(float)
 
     grouping_columns = [
@@ -153,7 +161,7 @@ def build_cohort_analysis(
             avg_realized_move=("realized_move_numeric", "mean"),
             avg_difference=("difference_realized_minus_implied", "mean"),
             hit_rate_realized_gt_implied=("hit_realized_gt_implied", "mean"),
-            event_count=("implied_move_numeric", "count"),
+            event_count=("implied_move_numeric", "size"),
         )
         .reset_index()
     )
