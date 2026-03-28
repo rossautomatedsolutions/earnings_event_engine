@@ -57,7 +57,9 @@ def _coerce_bool(series: pd.Series) -> pd.Series:
     falsy = as_str.isin({"0", "false", "f", "no", "n", "nan", "none", ""})
     out = pd.Series(False, index=series.index)
     out.loc[truthy] = True
-    out.loc[~truthy & ~falsy] = series.loc[~truthy & ~falsy].astype(bool)
+    remainder = ~truthy & ~falsy
+    non_missing_remainder = remainder & series.notna()
+    out.loc[non_missing_remainder] = series.loc[non_missing_remainder].astype(bool)
     return out
 
 
@@ -72,9 +74,18 @@ def _infer_price_validity(
     if price_valid_col in events_df.columns:
         return _coerce_bool(events_df[price_valid_col])
 
-    pre_close = pd.to_numeric(events_df.get(pre_close_col), errors="coerce")
-    post_open = pd.to_numeric(events_df.get(post_open_col), errors="coerce")
-    post_close = pd.to_numeric(events_df.get(post_close_col), errors="coerce")
+    pre_close = pd.to_numeric(
+        events_df.get(pre_close_col, pd.Series(index=events_df.index, dtype=float)),
+        errors="coerce",
+    )
+    post_open = pd.to_numeric(
+        events_df.get(post_open_col, pd.Series(index=events_df.index, dtype=float)),
+        errors="coerce",
+    )
+    post_close = pd.to_numeric(
+        events_df.get(post_close_col, pd.Series(index=events_df.index, dtype=float)),
+        errors="coerce",
+    )
 
     valid_pre = pre_close.notna() & (pre_close > 0)
     valid_open = post_open.notna() & (post_open > 0)
@@ -127,8 +138,15 @@ def _build_event_level_table(
     timing_valid: pd.Series,
 ) -> pd.DataFrame:
     event_level = pd.DataFrame(index=events_df.index)
-    event_level["ticker"] = events_df.get(ticker_col, "UNKNOWN").fillna("UNKNOWN").astype(str)
-    parsed_dates = pd.to_datetime(events_df.get(event_date_col), errors="coerce")
+    event_level["ticker"] = (
+        events_df.get(ticker_col, pd.Series("UNKNOWN", index=events_df.index, dtype=object))
+        .fillna("UNKNOWN")
+        .astype(str)
+    )
+    parsed_dates = pd.to_datetime(
+        events_df.get(event_date_col, pd.Series(index=events_df.index, dtype=object)),
+        errors="coerce",
+    )
     event_level["event_date"] = parsed_dates
     event_level["event_year"] = parsed_dates.dt.year
 
