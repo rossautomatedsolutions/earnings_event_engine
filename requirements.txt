@@ -5,3 +5,7 @@ numpy>=1.26.0
 # Optional plotting and notebook support
 matplotlib>=3.8.0
 jupyter>=1.0.0
+
+# Data access and artifact formats for pipeline test script
+yfinance>=0.2.0
+pyarrow>=16.0.0
