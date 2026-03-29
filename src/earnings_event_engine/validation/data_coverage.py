@@ -34,6 +34,18 @@ class CoverageReport:
     per_year: pd.DataFrame
     event_level: pd.DataFrame
 
+    @property
+    def by_ticker(self) -> pd.DataFrame:
+        return self.per_ticker
+
+    @property
+    def by_year(self) -> pd.DataFrame:
+        return self.per_year
+
+    def __repr__(self) -> str:
+        summary_descriptor = self.summary.shape if hasattr(self.summary, "shape") else type(self.summary)
+        return f"CoverageReport(summary={summary_descriptor})"
+
 
 def _normalize_text(value: object) -> str:
     if pd.isna(value):

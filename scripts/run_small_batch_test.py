@@ -217,7 +217,7 @@ def main() -> None:
             mapped_session_col="mapped_session",
         )
 
-        coverage_summary, coverage_by_ticker, coverage_by_year = build_data_coverage_report(
+        coverage_report = build_data_coverage_report(
             diagnostics_flags.merge(
                 events_with_prices[
                     ["event_id", "ticker", "event_date", "announcement_timing", "mapped_session"]
@@ -230,6 +230,11 @@ def main() -> None:
             timing_col="announcement_timing",
             mapped_session_col="mapped_session",
         )
+        coverage_summary = coverage_report.summary
+        coverage_by_ticker = coverage_report.by_ticker
+        coverage_by_year = coverage_report.by_year
+        print("[DEBUG] Coverage Summary:")
+        print(coverage_summary)
 
     final_features = features_df.merge(
         diagnostics_flags[["event_id", "valid_event", "invalid_event", "failure_reasons"]],
