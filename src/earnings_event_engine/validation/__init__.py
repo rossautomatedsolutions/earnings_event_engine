@@ -2,6 +2,7 @@
 
 from .data_coverage import CoverageReport, build_data_coverage_report
 from .event_diagnostics import DiagnosticsConfig, run_event_diagnostics
+from .data_quality_score import score_event_data_quality
 from .sanity_checks import run_sanity_checks
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "DiagnosticsConfig",
     "build_data_coverage_report",
     "run_event_diagnostics",
+    "score_event_data_quality",
     "run_sanity_checks",
 ]
