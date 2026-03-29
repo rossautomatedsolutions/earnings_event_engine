@@ -22,9 +22,11 @@ for path in (REPO_ROOT, SRC_PATH):
 
 from data.earnings_calendar import get_earnings_dates
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
+from src.utils.datetime_utils import align_to_trading_day, normalize_index, to_naive, validate_datetime
 
 
 def parse_args() -> argparse.Namespace:
+    today = to_naive(pd.Timestamp.utcnow()).normalize()
     parser = argparse.ArgumentParser(
         description="Run the earnings event pipeline end-to-end for quick testing."
     )
@@ -35,12 +37,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--start-date",
-        default=(pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=365 * 2)).date().isoformat(),
+        default=(today - pd.Timedelta(days=365 * 2)).date().isoformat(),
         help="Inclusive start date in YYYY-MM-DD format.",
     )
     parser.add_argument(
         "--end-date",
-        default=pd.Timestamp.utcnow().normalize().date().isoformat(),
+        default=today.date().isoformat(),
         help="Inclusive end date in YYYY-MM-DD format.",
     )
     parser.add_argument(
@@ -63,7 +65,9 @@ def _normalize_ticker_list(raw: str) -> list[str]:
 
 
 def _infer_timing(earnings_ts: pd.Series) -> pd.Series:
-    hours = pd.to_datetime(earnings_ts, errors="coerce").dt.hour
+    parsed = pd.to_datetime(earnings_ts, errors="coerce")
+    naive = parsed.where(parsed.isna(), parsed.map(to_naive))
+    hours = naive.dt.hour
     # yfinance often returns timestamps where earlier hours are BMO-like and later AMC-like.
     return np.where(hours.fillna(16) < 12, "bmo", "amc")
 
@@ -94,8 +98,9 @@ def retrieve_and_normalize_events(
         )
 
     events = pd.concat(frames, ignore_index=True)
-    events["earnings_date"] = pd.to_datetime(events["earnings_date"], errors="coerce")
-    events = events.dropna(subset=["earnings_date"]).copy()
+    parsed_earnings = pd.to_datetime(events["earnings_date"], errors="coerce")
+    events = events.loc[parsed_earnings.notna()].copy()
+    events["earnings_date"] = parsed_earnings.loc[parsed_earnings.notna()].map(to_naive)
     events = events[
         (events["earnings_date"].dt.normalize() >= start_date)
         & (events["earnings_date"].dt.normalize() <= end_date)
@@ -142,7 +147,7 @@ def _download_price_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp)
         cols["Close"] = "close"
 
     out = history[list(cols.keys())].rename(columns=cols)
-    out.index = pd.to_datetime(out.index)
+    out.index = normalize_index(pd.to_datetime(out.index, errors="raise"))
     out = out.sort_index()
     return out
 
@@ -175,11 +180,12 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
         history["daily_ret"] = history["close"].pct_change()
         history["hv20"] = history["daily_ret"].rolling(20, min_periods=10).std(ddof=1)
 
-        idx = history.index
+        idx = normalize_index(history.index)
         for row_idx, row in group.iterrows():
-            event_date = pd.to_datetime(row["event_date"])
-            pre_pos = idx.searchsorted(event_date, side="left") - 1
-            post_pos = idx.searchsorted(event_date, side="left")
+            event_date = to_naive(validate_datetime(row["event_date"])).normalize()
+            pre_day, post_day = align_to_trading_day(event_date, idx)
+            pre_pos = idx.get_loc(pre_day) if pd.notna(pre_day) else -1
+            post_pos = idx.get_loc(post_day) if pd.notna(post_day) else len(history)
 
             if pre_pos >= 0:
                 pre_date = idx[pre_pos]
@@ -240,8 +246,8 @@ def main() -> None:
     if args.max_events <= 0:
         raise ValueError("--max-events must be > 0.")
 
-    start_date = pd.Timestamp(args.start_date).normalize()
-    end_date = pd.Timestamp(args.end_date).normalize()
+    start_date = to_naive(validate_datetime(args.start_date)).normalize()
+    end_date = to_naive(validate_datetime(args.end_date)).normalize()
     if start_date > end_date:
         raise ValueError("--start-date must be <= --end-date.")
 
