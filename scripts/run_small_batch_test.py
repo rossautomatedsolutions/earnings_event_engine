@@ -10,6 +10,7 @@ Pipeline stages executed:
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -38,7 +39,7 @@ MAX_EVENTS = 40
 OUTPUT_DIR = REPO_ROOT / "data" / "outputs" / "test_batch"
 
 
-def build_synthetic_options(events_with_prices: pd.DataFrame) -> pd.DataFrame:
+def build_synthetic_options(events_with_prices: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
     """Build a lightweight synthetic options snapshot with call+put legs per event."""
     if events_with_prices.empty:
         return pd.DataFrame(
@@ -57,7 +58,20 @@ def build_synthetic_options(events_with_prices: pd.DataFrame) -> pd.DataFrame:
     fallback_anchor = pd.to_numeric(events_with_prices["post_close"], errors="coerce")
     underlying = price_anchor.fillna(fallback_anchor)
 
-    valid = events_with_prices.loc[underlying.notna(), ["event_id"]].copy()
+    valid_mask = underlying.notna()
+    skipped = events_with_prices.loc[~valid_mask, ["event_id"]].copy()
+    if not skipped.empty:
+        skipped_ids = skipped["event_id"].astype(str).tolist()
+        message = (
+            "Missing pre_close/post_close; synthetic options not generated for some events"
+        )
+        details = {"skipped_count": len(skipped_ids), "event_ids": skipped_ids}
+        log_event("options", message, details)
+        print(f"[options] WARNING: {message}. skipped_count={len(skipped_ids)}")
+        if debug:
+            print(f"[options][debug] skipped_event_ids={skipped_ids}")
+
+    valid = events_with_prices.loc[valid_mask, ["event_id"]].copy()
     valid["underlying_price"] = underlying[underlying.notna()].astype(float).to_numpy()
 
     if valid.empty:
@@ -92,7 +106,64 @@ def safe_to_parquet(df: pd.DataFrame, path: Path) -> None:
     df.to_parquet(path, index=False)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a small-batch earnings pipeline test.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable per-event diagnostics and verbose failure logging.",
+    )
+    return parser.parse_args()
+
+
+def _compute_realized_move(events_with_prices: pd.DataFrame, features_df: pd.DataFrame) -> pd.Series:
+    if "realized_gap_move" in features_df.columns:
+        by_event = features_df.set_index("event_id")["realized_gap_move"]
+        return events_with_prices["event_id"].map(by_event)
+    return (
+        pd.to_numeric(events_with_prices["post_open"], errors="coerce")
+        / pd.to_numeric(events_with_prices["pre_close"], errors="coerce")
+        - 1.0
+    )
+
+
+def _print_debug_diagnostics(
+    events_with_prices: pd.DataFrame,
+    features_df: pd.DataFrame,
+    diagnostics_flags: pd.DataFrame,
+) -> None:
+    realized_move = _compute_realized_move(events_with_prices, features_df)
+    debug_rows = events_with_prices[
+        ["event_id", "announcement_timing", "mapped_session", "implied_move"]
+    ].copy()
+    debug_rows["realized_move"] = realized_move
+    debug_rows = debug_rows.merge(
+        diagnostics_flags[["event_id", "valid_event", "invalid_event", "failure_reasons"]],
+        on="event_id",
+        how="left",
+    )
+
+    print("\n=== Per-event debug diagnostics ===")
+    for row in debug_rows.itertuples(index=False):
+        print(
+            "[event]"
+            f" event_id={row.event_id}"
+            f" implied_move={row.implied_move}"
+            f" realized_move={row.realized_move}"
+            f" alignment=timing:{row.announcement_timing}|session:{row.mapped_session}"
+            f" valid={row.valid_event}"
+            f" failure_reasons={row.failure_reasons}"
+        )
+        if bool(row.invalid_event):
+            print(
+                "[event][failure]"
+                f" event_id={row.event_id}"
+                f" reasons={row.failure_reasons}"
+            )
+
+
 def main() -> None:
+    args = parse_args()
     log_event(
         "events",
         "Starting small batch pipeline test",
@@ -110,7 +181,7 @@ def main() -> None:
     events_with_prices = load_prices_and_compute_moves(events)
     log_event("prices", "Loaded price windows and computed move fields", {"event_count": len(events_with_prices)})
 
-    options_df = build_synthetic_options(events_with_prices)
+    options_df = build_synthetic_options(events_with_prices, debug=args.debug)
     log_event("options", "Built synthetic options snapshots", {"option_rows": len(options_df)})
 
     features_df = generate_features(events_with_prices)
@@ -165,6 +236,14 @@ def main() -> None:
         on="event_id",
         how="left",
     )
+
+    failed_events = diagnostics_flags.loc[diagnostics_flags["invalid_event"].fillna(False)].copy()
+    if not failed_events.empty:
+        for row in failed_events.itertuples(index=False):
+            print(f"[failure] event_id={row.event_id} reasons={row.failure_reasons}")
+
+    if args.debug and not events_with_prices.empty:
+        _print_debug_diagnostics(events_with_prices, features_df, diagnostics_flags)
 
     print("\n=== Diagnostics summary ===")
     print(diagnostics_summary.sort_values(["category", "metric"]).to_string(index=False))
