@@ -6,6 +6,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from utils.datetime_utils import assert_same_timezone, normalize_datetime_index, to_naive_datetime
 
 
 def compute_earnings_move(price_df: pd.DataFrame, earnings_dates: Iterable) -> pd.DataFrame:
@@ -40,6 +41,7 @@ def compute_earnings_move(price_df: pd.DataFrame, earnings_dates: Iterable) -> p
         working_df["date"] = pd.to_datetime(working_df["date"])
         working_df = working_df.set_index("date")
 
+    working_df.index = normalize_datetime_index(working_df.index)
     working_df = working_df.sort_index()
 
     open_col = "open" if "open" in working_df.columns else "Open"
@@ -49,9 +51,11 @@ def compute_earnings_move(price_df: pd.DataFrame, earnings_dates: Iterable) -> p
         raise ValueError("price_df must include open/close columns (open/close or Open/Close).")
 
     records = []
-    index = working_df.index
+    index = normalize_datetime_index(working_df.index)
 
     for earnings_date in pd.to_datetime(list(earnings_dates)):
+        earnings_date = to_naive_datetime(earnings_date)
+        assert_same_timezone(index, earnings_date)
         pre_pos = index.searchsorted(earnings_date, side="left") - 1
         post_pos = index.searchsorted(earnings_date, side="left")
 

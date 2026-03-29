@@ -1,80 +1,64 @@
-"""Shared datetime normalization utilities.
-
-All helpers in this module enforce explicit behavior and raise clear exceptions
-on invalid inputs instead of silently coercing data.
-"""
+"""Shared datetime normalization utilities."""
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
 
-_SUPPORTED_INPUT_TYPES = (str, datetime, pd.Timestamp)
-
-
-def validate_datetime(dt: Any) -> pd.Timestamp:
-    """Validate and parse a datetime-like input into ``pd.Timestamp``.
-
-    Supported input types are ``str``, ``datetime.datetime``, and
-    ``pandas.Timestamp``. Invalid strings, ``NaT`` values, and unsupported input
-    types raise explicit exceptions.
-    """
-
-    if not isinstance(dt, _SUPPORTED_INPUT_TYPES):
-        supported = ", ".join(t.__name__ for t in _SUPPORTED_INPUT_TYPES)
-        raise TypeError(f"Unsupported datetime type: {type(dt).__name__}. Expected one of: {supported}.")
-
-    try:
-        parsed = pd.Timestamp(dt)
-    except Exception as exc:  # pragma: no cover - defensive parsing branch
-        raise ValueError(f"Invalid datetime value: {dt!r}.") from exc
-
-    if pd.isna(parsed):
-        raise ValueError(f"Invalid datetime value: {dt!r}. Parsed result is NaT.")
-
+def to_naive_datetime(dt: Any) -> pd.Timestamp | None:
+    """Convert any datetime-like object to tz-naive pandas ``Timestamp``."""
+    if dt is None:
+        return None
+    parsed = pd.to_datetime(dt)
+    if hasattr(parsed, "tzinfo") and parsed.tzinfo is not None:
+        return parsed.tz_convert(None)
     return parsed
 
 
+def normalize_datetime_index(idx: pd.Index | pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Ensure pandas ``DatetimeIndex`` is timezone-naive."""
+    normalized = pd.to_datetime(idx)
+    if not isinstance(normalized, pd.DatetimeIndex):
+        normalized = pd.DatetimeIndex(normalized)
+    if hasattr(normalized, "tz") and normalized.tz is not None:
+        return normalized.tz_convert(None)
+    return normalized
+
+
+def assert_same_timezone(idx: pd.DatetimeIndex, dt: pd.Timestamp | None) -> None:
+    """Hard fail when index and datetime are not both timezone-naive."""
+    if hasattr(idx, "tz") and idx.tz is not None:
+        raise ValueError("Index should be tz-naive")
+    if dt is not None and hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+        raise ValueError("event_date should be tz-naive")
+
+
+def validate_datetime(dt: Any) -> pd.Timestamp:
+    """Validate datetime-like input and return tz-naive ``pd.Timestamp``."""
+    if dt is None:
+        raise ValueError("Datetime value cannot be None.")
+    parsed = to_naive_datetime(dt)
+    if parsed is None or pd.isna(parsed):
+        raise ValueError(f"Invalid datetime value: {dt!r}.")
+    return pd.Timestamp(parsed)
+
+
 def to_naive(dt: Any) -> pd.Timestamp:
-    """Convert a datetime-like value to a timezone-naive ``pd.Timestamp``.
-
-    Behavior:
-    - naive inputs are returned as timezone-naive timestamps
-    - tz-aware inputs are converted to UTC, then made naive
-    """
-
-    parsed = validate_datetime(dt)
-
-    if parsed.tz is not None:
-        return parsed.tz_convert("UTC").tz_localize(None)
-
-    return parsed.tz_localize(None)
+    """Backwards-compatible alias for ``to_naive_datetime``."""
+    parsed = to_naive_datetime(dt)
+    if parsed is None:
+        raise ValueError("Datetime value cannot be None.")
+    return pd.Timestamp(parsed)
 
 
 def normalize_index(idx: pd.Index | pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """Return a clean timezone-naive ``DatetimeIndex``.
-
-    - Converts non-datetime indexes via ``pd.to_datetime(..., errors='raise')``
-    - Converts tz-aware values to UTC and strips timezone
-    - Raises explicit errors for unparseable or null datetime values
-    """
-
-    try:
-        dti = idx if isinstance(idx, pd.DatetimeIndex) else pd.to_datetime(idx, errors="raise")
-        dti = pd.DatetimeIndex(dti)
-    except Exception as exc:
-        raise ValueError("Index cannot be converted to a DatetimeIndex.") from exc
-
-    if dti.hasnans:
+    """Backwards-compatible alias for ``normalize_datetime_index``."""
+    normalized = normalize_datetime_index(idx)
+    if normalized.hasnans:
         raise ValueError("DatetimeIndex contains null/NaT values.")
-
-    if dti.tz is not None:
-        dti = dti.tz_convert("UTC").tz_localize(None)
-
-    return dti
+    return normalized
 
 
 def align_to_trading_day(dt: Any, trading_index: pd.Index | pd.DatetimeIndex) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -89,6 +73,7 @@ def align_to_trading_day(dt: Any, trading_index: pd.Index | pd.DatetimeIndex) ->
 
     target = to_naive(dt).normalize()
     dti = normalize_index(trading_index)
+    assert_same_timezone(dti, target)
 
     if dti.empty:
         raise ValueError("Trading index is empty.")

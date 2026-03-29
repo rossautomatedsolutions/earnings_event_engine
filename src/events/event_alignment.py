@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.utils.datetime_utils import assert_same_timezone, normalize_datetime_index, to_naive_datetime
 
 _BEFORE_OPEN_ALIASES = {"before_open", "bmo", "pre_market", "pre-open", "pre_open"}
 _AFTER_CLOSE_ALIASES = {"after_close", "amc", "post_market", "post-close", "post_close"}
@@ -34,12 +35,7 @@ def _normalize_price_index(price_index: Any) -> pd.DatetimeIndex:
     else:
         raise TypeError("price_index must be a DatetimeIndex, DataFrame/Series with a DatetimeIndex, or iterable of dates")
 
-    if not isinstance(trading_index, pd.DatetimeIndex):
-        trading_index = pd.DatetimeIndex(trading_index)
-
-    if trading_index.tz is not None:
-        trading_index = trading_index.tz_localize(None)
-
+    trading_index = normalize_datetime_index(trading_index)
     return trading_index.dropna().sort_values().unique()
 
 
@@ -53,10 +49,11 @@ def align_event_to_sessions(event_date: Any, announcement_timing: Any, price_ind
     """
 
     trading_days = _normalize_price_index(price_index)
-    event_ts = pd.Timestamp(event_date)
-    if event_ts.tzinfo is not None:
-        event_ts = event_ts.tz_localize(None)
+    event_ts = to_naive_datetime(event_date)
+    if event_ts is None:
+        raise ValueError("event_date is None")
     event_day = event_ts.normalize()
+    assert_same_timezone(trading_days, event_day)
 
     timing = _normalize_timing(announcement_timing)
 

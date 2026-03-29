@@ -10,6 +10,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from utils.datetime_utils import assert_same_timezone, normalize_datetime_index, to_naive_datetime
 
 _DATE_CANDIDATES = ("date", "quote_date", "as_of_date", "timestamp")
 _EXPIRY_CANDIDATES = ("expiration", "expiry", "expiration_date", "exp_date")
@@ -40,6 +41,7 @@ def _normalize_option_type(value: object) -> str:
 
 def _coerce_earnings_dates(earnings_dates: Iterable) -> pd.DatetimeIndex:
     idx = pd.to_datetime(list(earnings_dates), errors="coerce")
+    idx = normalize_datetime_index(idx)
     idx = pd.DatetimeIndex(idx[~pd.isna(idx)]).normalize().unique().sort_values()
     return idx
 
@@ -87,6 +89,7 @@ def compute_iv_vs_realized(option_df: pd.DataFrame, earnings_dates: Iterable) ->
         .drop_duplicates(subset=[date_col], keep="last")
         .set_index(date_col)[spot_col]
     )
+    daily_spot.index = normalize_datetime_index(daily_spot.index)
 
     earnings_idx = _coerce_earnings_dates(earnings_dates)
     if earnings_idx.empty:
@@ -133,6 +136,8 @@ def compute_iv_vs_realized(option_df: pd.DataFrame, earnings_dates: Iterable) ->
 
     records = []
     for event_date in earnings_idx:
+        event_date = to_naive_datetime(event_date)
+        assert_same_timezone(daily_spot.index, event_date)
         pre_dates = daily_spot.index[daily_spot.index <= event_date]
         post_dates = daily_spot.index[daily_spot.index > event_date]
 
@@ -147,8 +152,10 @@ def compute_iv_vs_realized(option_df: pd.DataFrame, earnings_dates: Iterable) ->
 
         implied_move = pd.NA
         if expiry_col and strike_col:
+            assert_same_timezone(normalize_datetime_index(option_view[date_col]), event_date)
             candidates = option_view[option_view[date_col] <= event_date].copy()
             if not candidates.empty:
+                assert_same_timezone(normalize_datetime_index(candidates[expiry_col]), event_date)
                 candidates = candidates[candidates[expiry_col] >= event_date]
             if not candidates.empty:
                 nearest_quote_date = candidates[date_col].max()
