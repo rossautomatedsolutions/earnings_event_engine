@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from src.utils.datetime_utils import to_naive
 
 
 def get_earnings_dates(ticker: str) -> pd.DataFrame:
@@ -32,8 +33,11 @@ def get_earnings_dates(ticker: str) -> pd.DataFrame:
 
         result = result[["earnings_date"]].copy()
         result.insert(0, "ticker", normalized_ticker)
-        result["earnings_date"] = pd.to_datetime(result["earnings_date"], errors="coerce")
-        return result.dropna(subset=["earnings_date"]).reset_index(drop=True)
+        parsed = pd.to_datetime(result["earnings_date"], errors="coerce")
+        valid_mask = parsed.notna()
+        result = result.loc[valid_mask].copy()
+        result["earnings_date"] = parsed.loc[valid_mask].map(to_naive)
+        return result.reset_index(drop=True)
 
     except Exception:
         return pd.DataFrame(columns=columns)
