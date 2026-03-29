@@ -254,7 +254,11 @@ def main() -> None:
     print(diagnostics_summary.sort_values(["category", "metric"]).to_string(index=False))
 
     print("\n=== Coverage summary ===")
-    print(coverage_summary.sort_values(["category", "metric"]).to_string(index=False))
+    if "category" in coverage_summary.columns:
+        coverage_summary = coverage_summary.sort_values(["category", "metric"])
+    else:
+        coverage_summary = coverage_summary.sort_values(["metric"])
+    print(coverage_summary.to_string(index=False))
 
     print("\n=== Sample output rows (events) ===")
     event_sample_cols = [
