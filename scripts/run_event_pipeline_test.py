@@ -22,7 +22,13 @@ for path in (REPO_ROOT, SRC_PATH):
 
 from data.earnings_calendar import get_earnings_dates
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
-from src.utils.datetime_utils import align_to_trading_day, normalize_index, to_naive, validate_datetime
+from utils.datetime_utils import (
+    assert_same_timezone,
+    normalize_datetime_index,
+    to_naive,
+    to_naive_datetime,
+    validate_datetime,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,7 +153,7 @@ def _download_price_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp)
         cols["Close"] = "close"
 
     out = history[list(cols.keys())].rename(columns=cols)
-    out.index = normalize_index(pd.to_datetime(out.index, errors="raise"))
+    out.index = normalize_datetime_index(pd.to_datetime(out.index, errors="raise"))
     out = out.sort_index()
     return out
 
@@ -180,12 +186,24 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
         history["daily_ret"] = history["close"].pct_change()
         history["hv20"] = history["daily_ret"].rolling(20, min_periods=10).std(ddof=1)
 
-        idx = normalize_index(history.index)
+        idx = normalize_datetime_index(history.index)
         for row_idx, row in group.iterrows():
-            event_date = to_naive(validate_datetime(row["event_date"])).normalize()
-            pre_day, post_day = align_to_trading_day(event_date, idx)
-            pre_pos = idx.get_loc(pre_day) if pd.notna(pre_day) else -1
-            post_pos = idx.get_loc(post_day) if pd.notna(post_day) else len(history)
+            event_date = to_naive_datetime(row["event_date"])
+            if event_date is not None:
+                event_date = event_date.normalize()
+            idx = idx.sort_values()
+
+            if event_date is None:
+                raise ValueError("event_date is None")
+
+            if not isinstance(idx, pd.DatetimeIndex):
+                raise TypeError("Index must be DatetimeIndex")
+
+            assert_same_timezone(idx, event_date)
+            print(f"[DEBUG] event_date={event_date}, idx_sample={idx[:3]}")
+
+            pre_pos = idx.searchsorted(event_date, side="left") - 1
+            post_pos = idx.searchsorted(event_date, side="left")
 
             if pre_pos >= 0:
                 pre_date = idx[pre_pos]

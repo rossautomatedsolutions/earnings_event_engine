@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.utils.datetime_utils import assert_same_timezone, normalize_datetime_index, to_naive_datetime
+
 _EXPIRY_CANDIDATES = ("expiration", "expiry", "expiration_date", "exp_date")
 _STRIKE_CANDIDATES = ("strike", "strike_price")
 _OPTION_TYPE_CANDIDATES = ("option_type", "type", "right")
@@ -110,7 +112,10 @@ def select_event_options(chain_df: pd.DataFrame, underlying_price: float, event_
         quality_flags["missing_required_columns"] = True
         return {"snapshot": empty_snapshot, "quality_flags": quality_flags}
 
-    event_ts = pd.Timestamp(event_date).normalize()
+    event_ts = to_naive_datetime(event_date)
+    if event_ts is None:
+        raise ValueError("event_date is None")
+    event_ts = event_ts.normalize()
     spot = pd.to_numeric(pd.Series([underlying_price]), errors="coerce").iloc[0]
 
     if pd.isna(spot) or spot <= 0:
@@ -120,7 +125,7 @@ def select_event_options(chain_df: pd.DataFrame, underlying_price: float, event_
             "quality_flags": quality_flags,
         }
 
-    df[expiry_col] = pd.to_datetime(df[expiry_col], errors="coerce").dt.normalize()
+    df[expiry_col] = normalize_datetime_index(pd.to_datetime(df[expiry_col], errors="coerce")).normalize()
     df[strike_col] = pd.to_numeric(df[strike_col], errors="coerce")
     df[type_col] = df[type_col].map(_normalize_option_type)
 
@@ -129,6 +134,7 @@ def select_event_options(chain_df: pd.DataFrame, underlying_price: float, event_
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df[df[expiry_col].notna() & df[strike_col].notna()]
+    assert_same_timezone(normalize_datetime_index(df[expiry_col]), event_ts)
     df = df[df[expiry_col] > event_ts]
     if df.empty:
         quality_flags["no_event_expiry_found"] = True
