@@ -234,7 +234,18 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
                 pre_date = idx[pre_pos]
                 group.at[row_idx, "pre_close"] = history.iloc[pre_pos]["close"]
                 hv = history.loc[pre_date, "hv20"]
-                if pd.notna(hv):
+                print(f"[DEBUG] hv type: {type(hv)}")
+                # Ensure hv is scalar
+                if isinstance(hv, pd.Series):
+                    if hv.empty:
+                        hv = None
+                    else:
+                        hv = hv.iloc[-1]  # take most recent value
+
+                assert not isinstance(hv, pd.Series), "hv should be scalar after normalization"
+
+                # Now safe check
+                if hv is not None and pd.notna(hv):
                     # Convert annualized daily-vol estimate to one-session expected absolute move.
                     group.at[row_idx, "implied_move"] = float(hv)
 
