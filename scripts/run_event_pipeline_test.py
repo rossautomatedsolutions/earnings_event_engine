@@ -75,7 +75,48 @@ def _infer_timing(earnings_ts: pd.Series) -> pd.Series:
     naive = parsed.where(parsed.isna(), parsed.map(to_naive))
     hours = naive.dt.hour
     # yfinance often returns timestamps where earlier hours are BMO-like and later AMC-like.
-    return np.where(hours.fillna(16) < 12, "bmo", "amc")
+    inferred = np.where(hours.fillna(16) < 12, "BMO", "AMC")
+    return pd.Series(inferred, index=earnings_ts.index, dtype="object")
+
+
+def _normalize_timing(events: pd.DataFrame) -> pd.Series:
+    timing_aliases = {
+        "amc": "AMC",
+        "after market close": "AMC",
+        "after_close": "AMC",
+        "post_market": "AMC",
+        "post-close": "AMC",
+        "post_close": "AMC",
+        "bmo": "BMO",
+        "before market open": "BMO",
+        "before_open": "BMO",
+        "pre_market": "BMO",
+        "pre-open": "BMO",
+        "pre_open": "BMO",
+    }
+    timing_cols = [
+        col
+        for col in ("timing", "announcement_timing", "earnings_timing", "time_of_day", "session")
+        if col in events.columns
+    ]
+
+    normalized = pd.Series("UNKNOWN", index=events.index, dtype="object")
+    for col in timing_cols:
+        raw = (
+            events[col]
+            .astype("string")
+            .str.strip()
+            .str.lower()
+        )
+        mapped = raw.map(timing_aliases).fillna("UNKNOWN")
+        normalized = np.where(normalized.eq("UNKNOWN"), mapped, normalized)
+        normalized = pd.Series(normalized, index=events.index, dtype="object")
+
+    inferred = _infer_timing(events["earnings_date"])
+    missing = normalized.eq("UNKNOWN")
+    normalized.loc[missing] = inferred.loc[missing]
+    normalized = normalized.fillna("AMC")
+    return normalized.replace("UNKNOWN", "AMC")
 
 
 def retrieve_and_normalize_events(
@@ -139,10 +180,9 @@ def retrieve_and_normalize_events(
 
     events["ticker"] = events["ticker"].astype(str).str.upper()
     events["event_date"] = events["earnings_date"].dt.normalize()
-    events["announcement_timing"] = _infer_timing(events["earnings_date"])
-    events["mapped_session"] = np.where(
-        events["announcement_timing"].eq("bmo"), "same_day", "next_day"
-    )
+    events["timing"] = _normalize_timing(events)
+    events["announcement_timing"] = events["timing"]
+    events["mapped_session"] = np.where(events["timing"].eq("BMO"), "same_day", "next_day")
 
     events = (
         events.sort_values(["event_date", "ticker"])
@@ -202,6 +242,7 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
         group["post_open"] = pd.NA
         group["post_close"] = pd.NA
         group["implied_move"] = pd.NA
+        group["price_alignment_valid"] = False
 
         if history.empty:
             enriched.append(group)
@@ -211,47 +252,72 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
         history["daily_ret"] = history["close"].pct_change()
         history["hv20"] = history["daily_ret"].rolling(20, min_periods=10).std(ddof=1)
 
-        idx = normalize_datetime_index(history.index)
+        idx = normalize_datetime_index(history.index).sort_values()
+        debug_printed = 0
         for row_idx, row in group.iterrows():
             event_date = to_naive_datetime(row["event_date"])
             if event_date is not None:
                 event_date = event_date.normalize()
-            idx = idx.sort_values()
 
             if event_date is None:
-                raise ValueError("event_date is None")
+                continue
 
             if not isinstance(idx, pd.DatetimeIndex):
-                raise TypeError("Index must be DatetimeIndex")
+                continue
 
             assert_same_timezone(idx, event_date)
-            print(f"[DEBUG] event_date={event_date}, idx_sample={idx[:3]}")
 
-            pre_pos = idx.searchsorted(event_date, side="left") - 1
-            post_pos = idx.searchsorted(event_date, side="left")
+            timing = str(row.get("timing", "AMC")).upper()
+            if timing not in {"AMC", "BMO"}:
+                timing = "AMC"
 
-            if pre_pos >= 0:
-                pre_date = idx[pre_pos]
-                group.at[row_idx, "pre_close"] = history.iloc[pre_pos]["close"]
+            pos = idx.searchsorted(event_date, side="left")
+            exact_match = pos < len(idx) and idx[pos] == event_date
+
+            pre_idx = None
+            post_idx = None
+            if timing == "AMC":
+                pre_idx = pos if exact_match else pos - 1
+                post_idx = pos + 1
+            elif timing == "BMO":
+                pre_idx = pos - 1
+                post_idx = pos
+
+            has_pre = pre_idx is not None and 0 <= pre_idx < len(idx)
+            has_post = post_idx is not None and 0 <= post_idx < len(idx)
+
+            if has_pre:
+                pre_date = idx[pre_idx]
+                group.at[row_idx, "pre_close"] = history.iloc[pre_idx]["close"]
                 hv = history.loc[pre_date, "hv20"]
-                print(f"[DEBUG] hv type: {type(hv)}")
-                # Ensure hv is scalar
                 if isinstance(hv, pd.Series):
-                    if hv.empty:
-                        hv = None
-                    else:
-                        hv = hv.iloc[-1]  # take most recent value
-
-                assert not isinstance(hv, pd.Series), "hv should be scalar after normalization"
-
-                # Now safe check
+                    hv = hv.iloc[-1] if not hv.empty else None
                 if hv is not None and pd.notna(hv):
-                    # Convert annualized daily-vol estimate to one-session expected absolute move.
                     group.at[row_idx, "implied_move"] = float(hv)
 
-            if post_pos < len(history):
-                group.at[row_idx, "post_open"] = history.iloc[post_pos]["open"]
-                group.at[row_idx, "post_close"] = history.iloc[post_pos]["close"]
+            if has_post:
+                group.at[row_idx, "post_open"] = history.iloc[post_idx]["open"]
+                group.at[row_idx, "post_close"] = history.iloc[post_idx]["close"]
+
+            pre_close = pd.to_numeric(pd.Series([group.at[row_idx, "pre_close"]]), errors="coerce").iloc[0]
+            post_open = pd.to_numeric(pd.Series([group.at[row_idx, "post_open"]]), errors="coerce").iloc[0]
+            post_close = pd.to_numeric(pd.Series([group.at[row_idx, "post_close"]]), errors="coerce").iloc[0]
+            valid = (
+                pd.notna(pre_close) and pre_close > 0
+                and pd.notna(post_open) and post_open > 0
+                and pd.notna(post_close) and post_close > 0
+            )
+            group.at[row_idx, "price_alignment_valid"] = bool(valid)
+
+            if debug_printed < 5:
+                print(
+                    "[DEBUG] price_alignment "
+                    f"event_date={event_date.date()} timing={timing} "
+                    f"pre_close={group.at[row_idx, 'pre_close']} "
+                    f"post_open={group.at[row_idx, 'post_open']} "
+                    f"post_close={group.at[row_idx, 'post_close']}"
+                )
+                debug_printed += 1
 
         enriched.append(group)
 
