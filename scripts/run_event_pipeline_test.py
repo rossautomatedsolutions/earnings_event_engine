@@ -231,6 +231,13 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
                 empty[col] = pd.Series(dtype="float")
         return empty
 
+    def extract_scalar(x):
+        if isinstance(x, pd.Series):
+            if len(x) == 1:
+                return float(x.iloc[0])
+            return float(x.squeeze())
+        return float(x)
+
     enriched: list[pd.DataFrame] = []
     for ticker, group in events.groupby("ticker", sort=False):
         start = group["event_date"].min() - pd.Timedelta(days=45)
@@ -299,9 +306,31 @@ def load_prices_and_compute_moves(events: pd.DataFrame) -> pd.DataFrame:
                 group.at[row_idx, "post_open"] = history.iloc[post_idx]["open"]
                 group.at[row_idx, "post_close"] = history.iloc[post_idx]["close"]
 
-            pre_close = pd.to_numeric(pd.Series([group.at[row_idx, "pre_close"]]), errors="coerce").iloc[0]
-            post_open = pd.to_numeric(pd.Series([group.at[row_idx, "post_open"]]), errors="coerce").iloc[0]
-            post_close = pd.to_numeric(pd.Series([group.at[row_idx, "post_close"]]), errors="coerce").iloc[0]
+            pre_close = group.at[row_idx, "pre_close"]
+            post_open = group.at[row_idx, "post_open"]
+            post_close = group.at[row_idx, "post_close"]
+
+            try:
+                pre_close = extract_scalar(pre_close)
+            except Exception:
+                pre_close = None
+            try:
+                post_open = extract_scalar(post_open)
+            except Exception:
+                post_open = None
+            try:
+                post_close = extract_scalar(post_close)
+            except Exception:
+                post_close = None
+
+            assert not isinstance(pre_close, pd.Series)
+            assert not isinstance(post_open, pd.Series)
+            assert not isinstance(post_close, pd.Series)
+
+            group.at[row_idx, "pre_close"] = pre_close
+            group.at[row_idx, "post_open"] = post_open
+            group.at[row_idx, "post_close"] = post_close
+
             valid = (
                 pd.notna(pre_close) and pre_close > 0
                 and pd.notna(post_open) and post_open > 0
