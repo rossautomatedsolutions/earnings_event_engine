@@ -84,6 +84,8 @@ def retrieve_and_normalize_events(
     end_date: pd.Timestamp,
     max_events: int,
 ) -> pd.DataFrame:
+    import pandas as pd
+
     frames: list[pd.DataFrame] = []
     for ticker in tickers:
         df = get_earnings_dates(ticker)
@@ -104,13 +106,36 @@ def retrieve_and_normalize_events(
         )
 
     events = pd.concat(frames, ignore_index=True)
+
+    # Normalize earnings_date column
+    events["earnings_date"] = pd.to_datetime(events["earnings_date"], errors="coerce")
+
+    # Force tz-naive
+    if hasattr(events["earnings_date"].dt, "tz") and events["earnings_date"].dt.tz is not None:
+        events["earnings_date"] = events["earnings_date"].dt.tz_convert(None)
+
     parsed_earnings = pd.to_datetime(events["earnings_date"], errors="coerce")
     events = events.loc[parsed_earnings.notna()].copy()
-    events["earnings_date"] = parsed_earnings.loc[parsed_earnings.notna()].map(to_naive)
-    events = events[
-        (events["earnings_date"].dt.normalize() >= start_date)
-        & (events["earnings_date"].dt.normalize() <= end_date)
-    ].copy()
+    events["earnings_date"] = parsed_earnings.loc[parsed_earnings.notna()]
+
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+
+    if start_date.tzinfo is not None:
+        start_date = start_date.tz_convert(None)
+
+    if end_date.tzinfo is not None:
+        end_date = end_date.tz_convert(None)
+
+    print("[DEBUG] earnings_date dtype:", events["earnings_date"].dtype)
+    print("[DEBUG] start_date:", start_date)
+    print("[DEBUG] end_date:", end_date)
+
+    mask = (
+        (events["earnings_date"] >= start_date)
+        & (events["earnings_date"] <= end_date)
+    )
+    events = events.loc[mask].copy()
 
     events["ticker"] = events["ticker"].astype(str).str.upper()
     events["event_date"] = events["earnings_date"].dt.normalize()
