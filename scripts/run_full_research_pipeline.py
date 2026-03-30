@@ -2,7 +2,6 @@
 
 import logging
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -20,7 +19,7 @@ FEATURES_PATH = OUTPUT_DIR / "features.parquet"
 
 def run_data_pipeline() -> None:
     """Run the existing small-batch data pipeline script."""
-    subprocess.run([sys.executable, "scripts/run_small_batch_test.py"], check=True)
+    subprocess.run(["python", "scripts/run_small_batch_test.py"], check=True)
 
 
 def run_analysis() -> None:
