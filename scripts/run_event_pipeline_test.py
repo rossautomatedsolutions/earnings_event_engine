@@ -373,6 +373,34 @@ def generate_features(events: pd.DataFrame) -> pd.DataFrame:
         features.groupby("ticker")["event_date"].diff().dt.days.astype("float")
     )
 
+    macro_regime_path = REPO_ROOT / "data" / "inputs" / "macro_regime.csv"
+    if macro_regime_path.exists():
+        macro_regime_df = pd.read_csv(macro_regime_path)
+        required_cols = {"event_date", "macro_regime"}
+        if required_cols.issubset(macro_regime_df.columns):
+            macro_regime_df = macro_regime_df.loc[:, ["event_date", "macro_regime"]].copy()
+            macro_regime_df["event_date"] = pd.to_datetime(
+                macro_regime_df["event_date"],
+                errors="coerce",
+            ).dt.normalize()
+            macro_regime_df = macro_regime_df.dropna(subset=["event_date"]).drop_duplicates(
+                subset=["event_date"],
+                keep="last",
+            )
+            features["event_date"] = pd.to_datetime(features["event_date"], errors="coerce").dt.normalize()
+            features = features.merge(macro_regime_df, on="event_date", how="left")
+
+    if "macro_regime" not in features.columns:
+        features["macro_regime"] = "unknown"
+    else:
+        features["macro_regime"] = (
+            features["macro_regime"]
+            .astype("string")
+            .str.strip()
+            .fillna("unknown")
+            .replace("", "unknown")
+        )
+
     return features
 
 
