@@ -9,6 +9,13 @@ from analysis.conditional_analysis import (
     run_conditional_analysis,
 )
 
+from analysis.event_filtering import (
+    analyze_characteristics,
+    get_bottom_events,
+    get_top_events,
+    run_event_filtering,
+)
+
 __all__ = [
     "filter_high_iv",
     "filter_low_iv",
@@ -16,4 +23,8 @@ __all__ = [
     "compare_by_timing",
     "compare_by_macro_regime",
     "run_conditional_analysis",
+    "get_top_events",
+    "get_bottom_events",
+    "analyze_characteristics",
+    "run_event_filtering",
 ]
