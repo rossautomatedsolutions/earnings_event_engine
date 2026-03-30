@@ -99,11 +99,7 @@ def _infer_price_validity(
         errors="coerce",
     )
 
-    valid_pre = pre_close.notna() & (pre_close > 0)
-    valid_open = post_open.notna() & (post_open > 0)
-    valid_close = post_close.notna() & (post_close > 0)
-
-    return valid_pre & (valid_open | valid_close)
+    return pre_close.notna() & post_open.notna() & post_close.notna()
 
 
 def _infer_options_validity(events_df: pd.DataFrame, *, options_valid_col: str) -> pd.Series:
