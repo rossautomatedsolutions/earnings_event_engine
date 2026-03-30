@@ -2,8 +2,14 @@
 
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+# Add project root to Python path
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
 
 from analysis.conditional_analysis import run_conditional_analysis
 from analysis.earnings_analysis import run_full_analysis
