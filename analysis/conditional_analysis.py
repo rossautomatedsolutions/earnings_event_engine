@@ -9,6 +9,7 @@ import pandas as pd
 
 _REQUIRED_COMPARE_COLUMNS = {"implied_move", "pnl"}
 _REQUIRED_TIMING_BASE_COLUMNS = {"realized_gap_move", "pnl"}
+_REQUIRED_MACRO_COLUMNS = {"macro_regime", "pnl"}
 _TIMING_COLUMN_CANDIDATES = ("announcement_timing", "timing")
 
 
@@ -94,6 +95,28 @@ def compare_by_timing(df: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("timing").reset_index(drop=True)
 
 
+def compare_by_macro_regime(df: pd.DataFrame) -> pd.DataFrame:
+    """Compare strategy outcomes by macro regime."""
+    _validate_columns(df, _REQUIRED_MACRO_COLUMNS, "compare_by_macro_regime")
+
+    working = df.copy()
+    macro_regime = working["macro_regime"].astype("string").str.strip()
+    working["macro_regime"] = macro_regime.fillna("unknown")
+
+    grouped = (
+        working.groupby("macro_regime", dropna=False)
+        .agg(
+            event_count=("macro_regime", "size"),
+            avg_pnl=("pnl", lambda s: pd.to_numeric(s, errors="coerce").mean()),
+            win_rate=("pnl", _safe_win_rate),
+        )
+        .reset_index()
+        .sort_values("event_count", ascending=False)
+        .reset_index(drop=True)
+    )
+    return grouped
+
+
 def _load_analysis_frame(path: str | Path) -> pd.DataFrame:
     """Load a local analysis file from CSV or Parquet."""
     input_path = Path(path)
@@ -110,9 +133,13 @@ def run_conditional_analysis(data: pd.DataFrame | str | Path) -> dict[str, pd.Da
     """Run all conditional comparisons to identify potential edge conditions."""
     df = data.copy() if isinstance(data, pd.DataFrame) else _load_analysis_frame(data)
 
-    return {
+    output = {
         "high_iv": filter_high_iv(df),
         "low_iv": filter_low_iv(df),
         "group_comparison": compare_groups(df),
         "timing_comparison": compare_by_timing(df),
     }
+    if "macro_regime" in df.columns:
+        output["macro_regime_comparison"] = compare_by_macro_regime(df)
+
+    return output
