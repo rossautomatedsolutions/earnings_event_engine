@@ -6,6 +6,8 @@ import sys
 import time
 from pathlib import Path
 
+import pandas as pd
+
 # Add project root to Python path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -14,7 +16,7 @@ if str(ROOT_DIR) not in sys.path:
 from analysis.conditional_analysis import run_conditional_analysis
 from analysis.earnings_analysis import run_full_analysis
 from analysis.visualizations import run_all_plots
-from strategies.straddle_simulator import run_straddle_analysis
+from strategies.straddle_simulator import run_straddle_analysis, simulate_straddle
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,7 +47,9 @@ def run_strategy() -> None:
 
 def run_conditionals() -> None:
     """Run conditional analysis module."""
-    run_conditional_analysis(FEATURES_PATH)
+    features = pd.read_parquet(FEATURES_PATH)
+    strategy_results = simulate_straddle(features)
+    run_conditional_analysis(strategy_results)
 
 
 def _run_step(step_name: str, step_fn) -> None:
