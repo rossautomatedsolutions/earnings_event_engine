@@ -8,7 +8,8 @@ import pandas as pd
 
 
 _REQUIRED_COMPARE_COLUMNS = {"implied_move", "pnl"}
-_REQUIRED_TIMING_COLUMNS = {"timing", "realized_move", "pnl"}
+_REQUIRED_TIMING_BASE_COLUMNS = {"realized_gap_move", "pnl"}
+_TIMING_COLUMN_CANDIDATES = ("announcement_timing", "timing")
 
 
 def _validate_columns(df: pd.DataFrame, required: set[str], fn_name: str) -> None:
@@ -62,11 +63,14 @@ def compare_groups(df: pd.DataFrame) -> pd.DataFrame:
 
 def compare_by_timing(df: pd.DataFrame) -> pd.DataFrame:
     """Compare AMC vs BMO by average realized move and average PnL."""
-    _validate_columns(df, _REQUIRED_TIMING_COLUMNS, "compare_by_timing")
+    _validate_columns(df, _REQUIRED_TIMING_BASE_COLUMNS, "compare_by_timing")
+    timing_column = next((column for column in _TIMING_COLUMN_CANDIDATES if column in df.columns), None)
+    if timing_column is None:
+        raise ValueError(f"compare_by_timing requires one of columns: {list(_TIMING_COLUMN_CANDIDATES)}")
 
     working = df.copy()
     timing = (
-        working["timing"]
+        working[timing_column]
         .astype(str)
         .str.strip()
         .str.upper()
@@ -80,7 +84,7 @@ def compare_by_timing(df: pd.DataFrame) -> pd.DataFrame:
         filtered.groupby("timing_normalized", dropna=False)
         .agg(
             event_count=("timing_normalized", "size"),
-            avg_realized_move=("realized_move", lambda s: pd.to_numeric(s, errors="coerce").mean()),
+            avg_realized_gap_move=("realized_gap_move", lambda s: pd.to_numeric(s, errors="coerce").mean()),
             avg_pnl=("pnl", lambda s: pd.to_numeric(s, errors="coerce").mean()),
         )
         .reset_index()
@@ -102,9 +106,9 @@ def _load_analysis_frame(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(input_path)
 
 
-def run_conditional_analysis(path: str | Path) -> dict[str, pd.DataFrame]:
+def run_conditional_analysis(data: pd.DataFrame | str | Path) -> dict[str, pd.DataFrame]:
     """Run all conditional comparisons to identify potential edge conditions."""
-    df = _load_analysis_frame(path)
+    df = data.copy() if isinstance(data, pd.DataFrame) else _load_analysis_frame(data)
 
     return {
         "high_iv": filter_high_iv(df),
