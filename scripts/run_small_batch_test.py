@@ -32,10 +32,23 @@ from scripts.run_event_pipeline_test import (
     retrieve_and_normalize_events,
 )
 
-TEST_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD"]
+# Broad, liquid universe for better small-batch statistics:
+# - Primarily SPY / S&P 500 constituents
+# - Includes a liquid mid-cap sleeve for cross-section diversity
+TEST_TICKERS = [
+    # SPY components (large cap)
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD", "AVGO", "JPM",
+    "V", "MA", "XOM", "JNJ", "WMT", "PG", "LLY", "UNH", "HD", "COST",
+    "MRK", "ABBV", "CVX", "KO", "PEP", "BAC", "ORCL", "CRM", "NFLX", "ADBE",
+    "CSCO", "TMO", "ACN", "MCD", "DHR", "LIN", "ABT", "WFC", "DIS", "INTC",
+    "VZ", "CMCSA", "TXN", "PM", "QCOM", "NEE", "HON", "UPS", "RTX", "LOW",
+    # Liquid mid-cap sleeve
+    "RCL", "NCLH", "DAL", "UAL", "ETSY", "DKNG", "PINS", "ROKU", "HOOD", "SOFI",
+    "CVNA", "RIVN", "SNAP", "CHWY", "U", "TWLO", "FSLY", "AFRM", "CROX", "ONON",
+]
 START_DATE = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=365 * 2)
 END_DATE = pd.Timestamp.utcnow().normalize()
-MAX_EVENTS = 40
+MAX_EVENTS = 240
 OUTPUT_DIR = REPO_ROOT / "data" / "outputs" / "test_batch"
 
 
