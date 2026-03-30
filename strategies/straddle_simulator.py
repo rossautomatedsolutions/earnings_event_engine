@@ -22,14 +22,14 @@ def _validate_input(df: pd.DataFrame) -> pd.DataFrame:
     return results
 
 
-def simulate_straddle(df: pd.DataFrame) -> pd.DataFrame:
+def simulate_straddle(df: pd.DataFrame, cost_multiplier: float = 1.5) -> pd.DataFrame:
     """Simulate long straddle outcomes for each event row.
 
     Assumption: ``implied_move`` approximates straddle cost (in percent terms).
     """
     results = _validate_input(df)
 
-    results["cost"] = results["implied_move"]
+    results["cost"] = results["implied_move"] * cost_multiplier
     results["payoff"] = results["realized_gap_move"].abs()
     results["pnl"] = results["payoff"] - results["cost"]
 
@@ -45,6 +45,8 @@ def compute_summary(results: pd.DataFrame) -> dict[str, float]:
     if pnl.empty:
         return {
             "avg_pnl": float("nan"),
+            "avg_cost": float("nan"),
+            "avg_payoff": float("nan"),
             "win_rate": float("nan"),
             "median_pnl": float("nan"),
             "max_gain": float("nan"),
@@ -53,6 +55,8 @@ def compute_summary(results: pd.DataFrame) -> dict[str, float]:
 
     return {
         "avg_pnl": float(pnl.mean()),
+        "avg_cost": float(pd.to_numeric(results["cost"], errors="coerce").mean()),
+        "avg_payoff": float(pd.to_numeric(results["payoff"], errors="coerce").mean()),
         "win_rate": float((pnl > 0).mean()),
         "median_pnl": float(pnl.median()),
         "max_gain": float(pnl.max()),
@@ -92,10 +96,13 @@ def _load_features(path: str | Path) -> pd.DataFrame:
     raise ValueError(f"Unsupported file type '{suffix}'. Use CSV or Parquet input.")
 
 
-def run_straddle_analysis(path: str | Path) -> tuple[pd.DataFrame, dict[str, float], pd.DataFrame]:
+def run_straddle_analysis(
+    path: str | Path,
+    cost_multiplier: float = 1.5,
+) -> tuple[pd.DataFrame, dict[str, float], pd.DataFrame]:
     """Load features, run simulation, and print summary and ticker breakdown."""
     features = _load_features(path)
-    results = simulate_straddle(features)
+    results = simulate_straddle(features, cost_multiplier=cost_multiplier)
     summary = compute_summary(results)
 
     print("Long Straddle Summary")
