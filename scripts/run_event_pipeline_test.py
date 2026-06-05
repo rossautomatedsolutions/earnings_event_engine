@@ -119,6 +119,37 @@ def _normalize_timing(events: pd.DataFrame) -> pd.Series:
     return normalized.replace("UNKNOWN", "AMC")
 
 
+def _build_coverage_input_df(
+    diagnostics_flags: pd.DataFrame,
+    events_with_prices: pd.DataFrame,
+) -> pd.DataFrame:
+    required_event_columns = [
+        "event_id",
+        "ticker",
+        "event_date",
+        "announcement_timing",
+        "mapped_session",
+        "price_alignment_valid",
+    ]
+    missing_columns = [col for col in required_event_columns if col not in events_with_prices.columns]
+    if missing_columns:
+        raise AssertionError(
+            "Coverage input is missing required event columns: "
+            + ", ".join(missing_columns)
+        )
+
+    coverage_input = diagnostics_flags.merge(
+        events_with_prices[required_event_columns],
+        on="event_id",
+        how="left",
+    )
+
+    if "price_alignment_valid" not in coverage_input.columns:
+        raise AssertionError("Coverage input must include price_alignment_valid.")
+
+    return coverage_input
+
+
 def retrieve_and_normalize_events(
     tickers: list[str],
     start_date: pd.Timestamp,
@@ -460,13 +491,10 @@ def main() -> None:
 
         # Coverage report provides additional validation-layer visibility.
         _ = build_data_coverage_report(
-            diagnostics_flags.merge(
-                events_with_prices[["event_id", "ticker", "event_date", "announcement_timing", "mapped_session"]],
-                on="event_id",
-                how="left",
-            ),
+            _build_coverage_input_df(diagnostics_flags, events_with_prices),
             ticker_col="ticker",
             event_date_col="event_date",
+            price_valid_col="price_alignment_valid",
             timing_col="announcement_timing",
             mapped_session_col="mapped_session",
         )

@@ -27,6 +27,7 @@ for path in (REPO_ROOT, SRC_PATH):
 from earnings_event_engine.utils.debug_logger import log_event
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
 from scripts.run_event_pipeline_test import (
+    _build_coverage_input_df,
     generate_features,
     load_prices_and_compute_moves,
     retrieve_and_normalize_events,
@@ -231,15 +232,10 @@ def main() -> None:
         )
 
         coverage_report = build_data_coverage_report(
-            diagnostics_flags.merge(
-                events_with_prices[
-                    ["event_id", "ticker", "event_date", "announcement_timing", "mapped_session"]
-                ],
-                on="event_id",
-                how="left",
-            ),
+            _build_coverage_input_df(diagnostics_flags, events_with_prices),
             ticker_col="ticker",
             event_date_col="event_date",
+            price_valid_col="price_alignment_valid",
             timing_col="announcement_timing",
             mapped_session_col="mapped_session",
         )
