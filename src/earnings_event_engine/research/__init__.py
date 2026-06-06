@@ -2,6 +2,7 @@
 
 from .pead import (
     DEFAULT_WINDOWS,
+    add_forward_close_columns,
     assign_reaction_bucket,
     calculate_announcement_reaction,
     calculate_forward_drift,
@@ -10,6 +11,7 @@ from .pead import (
 
 __all__ = [
     "DEFAULT_WINDOWS",
+    "add_forward_close_columns",
     "assign_reaction_bucket",
     "calculate_announcement_reaction",
     "calculate_forward_drift",

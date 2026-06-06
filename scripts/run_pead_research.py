@@ -16,6 +16,7 @@ for path in (REPO_ROOT, SRC_PATH):
 
 from earnings_event_engine.research import (
     DEFAULT_WINDOWS,
+    add_forward_close_columns,
     assign_reaction_bucket,
     calculate_announcement_reaction,
     calculate_forward_drift,
@@ -25,6 +26,15 @@ from earnings_event_engine.research import (
 
 DEFAULT_INPUT_PATH = REPO_ROOT / "data" / "outputs" / "test_batch" / "clean_events.parquet"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "research"
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported input format for {path}. Expected .parquet or .csv.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +69,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional explicit announcement close column. Defaults to post_close when available.",
+    )
+    parser.add_argument(
+        "--prices-path",
+        type=Path,
+        default=None,
+        help="Optional local price panel path (.parquet or .csv) with ticker/date/close to derive forward_close_{N}d columns.",
     )
     return parser.parse_args()
 
@@ -116,7 +132,15 @@ def _write_summary_markdown(
 
 def main() -> None:
     args = parse_args()
-    clean_events = pd.read_parquet(args.clean_events_path)
+    clean_events = _read_table(args.clean_events_path)
+
+    if args.prices_path is not None:
+        prices_df = _read_table(args.prices_path)
+        clean_events = add_forward_close_columns(
+            clean_events,
+            prices_df,
+            windows=args.windows,
+        )
 
     pead_events = calculate_announcement_reaction(
         clean_events,

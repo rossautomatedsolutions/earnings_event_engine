@@ -14,6 +14,7 @@ for path in (REPO_ROOT, SRC_PATH):
         sys.path.insert(0, str(path))
 
 from earnings_event_engine.research import (
+    add_forward_close_columns,
     assign_reaction_bucket,
     calculate_announcement_reaction,
     calculate_forward_drift,
@@ -28,6 +29,8 @@ class PeadResearchTest(unittest.TestCase):
                 "event_id": [1, 2, 3],
                 "ticker": ["AAPL", "MSFT", "NVDA"],
                 "event_date": pd.to_datetime(["2025-01-30", "2025-02-05", "2025-02-26"]),
+                "announcement_timing": ["AMC", "BMO", "BMO"],
+                "mapped_session": ["next_day", "same_day", "same_day"],
                 "valid_event": [True, True, True],
                 "price_alignment_valid": [True, True, True],
                 "pre_close": [100.0, 100.0, 100.0],
@@ -36,6 +39,77 @@ class PeadResearchTest(unittest.TestCase):
                 "forward_close_3d": [115.0, 90.0, 99.0],
             }
         )
+
+    def _prices_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ticker": [
+                    "AAPL",
+                    "AAPL",
+                    "AAPL",
+                    "AAPL",
+                    "MSFT",
+                    "MSFT",
+                    "MSFT",
+                    "MSFT",
+                    "NVDA",
+                    "NVDA",
+                ],
+                "date": pd.to_datetime(
+                    [
+                        "2025-01-30",
+                        "2025-01-31",
+                        "2025-02-03",
+                        "2025-02-04",
+                        "2025-02-05",
+                        "2025-02-06",
+                        "2025-02-07",
+                        "2025-02-10",
+                        "2025-02-26",
+                        "2025-02-27",
+                    ]
+                ),
+                "close": [108.0, 110.0, 112.0, 115.0, 95.0, 93.0, 90.0, 89.0, 100.0, 101.0],
+            }
+        )
+
+    def test_add_forward_close_columns_uses_local_price_panel(self) -> None:
+        events_df = self._base_events_df().drop(columns=["forward_close_1d", "forward_close_3d"])
+
+        enriched = add_forward_close_columns(events_df, self._prices_df(), windows=(1, 3))
+
+        self.assertEqual(enriched["forward_close_1d"].tolist(), [112.0, 93.0, 101.0])
+        self.assertTrue(pd.isna(enriched.loc[0, "forward_close_3d"]))
+        self.assertEqual(enriched.loc[1, "forward_close_3d"], 89.0)
+        self.assertTrue(pd.isna(enriched.loc[2, "forward_close_3d"]))
+
+    def test_add_forward_close_columns_keeps_tickers_isolated(self) -> None:
+        events_df = self._base_events_df().drop(columns=["forward_close_1d", "forward_close_3d"])
+        prices_df = self._prices_df().copy()
+        prices_df.loc[prices_df["ticker"] == "AAPL", "close"] = [108.0, 210.0, 212.0, 215.0]
+
+        enriched = add_forward_close_columns(events_df, prices_df, windows=(1,))
+
+        self.assertEqual(enriched["forward_close_1d"].tolist(), [212.0, 93.0, 101.0])
+
+    def test_add_forward_close_columns_leaves_missing_forward_rows_null(self) -> None:
+        events_df = self._base_events_df().drop(columns=["forward_close_1d", "forward_close_3d"])
+
+        enriched = add_forward_close_columns(events_df, self._prices_df(), windows=(3,))
+
+        self.assertTrue(pd.isna(enriched.loc[2, "forward_close_3d"]))
+
+    def test_derived_forward_close_columns_flow_through_pead_summary(self) -> None:
+        events_df = self._base_events_df().drop(columns=["forward_close_1d", "forward_close_3d"])
+        with_forward_closes = add_forward_close_columns(events_df, self._prices_df(), windows=(1, 3))
+        with_reaction = calculate_announcement_reaction(with_forward_closes)
+        with_drift = calculate_forward_drift(with_reaction, windows=(1, 3))
+        bucketed = assign_reaction_bucket(with_drift)
+
+        summary = summarize_pead_by_bucket(bucketed, windows=(1, 3))
+
+        self.assertFalse(summary.empty)
+        self.assertIn("positive_reaction", summary["reaction_bucket"].tolist())
 
     def test_calculate_announcement_reaction_uses_post_close_baseline(self) -> None:
         result = calculate_announcement_reaction(self._base_events_df())

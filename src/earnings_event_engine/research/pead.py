@@ -15,6 +15,7 @@ import pandas as pd
 DEFAULT_WINDOWS: tuple[int, ...] = (1, 3, 5, 10, 20)
 DEFAULT_POST_CLOSE_CANDIDATES: tuple[str, ...] = ("post_close", "announcement_close")
 CORE_REQUIRED_COLUMNS: tuple[str, ...] = ("event_id", "ticker", "event_date", "pre_close")
+PRICE_REQUIRED_COLUMNS: tuple[str, ...] = ("ticker", "date", "close")
 
 
 def _coerce_bool(series: pd.Series) -> pd.Series:
@@ -68,6 +69,63 @@ def _coerce_price_columns(events_df: pd.DataFrame, columns: Sequence[str]) -> pd
     return out
 
 
+def _normalize_tickers(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.upper().str.strip()
+
+
+def _resolve_mapped_session(events_df: pd.DataFrame) -> pd.Series:
+    if "mapped_session" in events_df.columns:
+        session = events_df["mapped_session"].astype("string").str.strip().str.lower()
+        return session.where(session.isin({"same_day", "next_day"}), "next_day")
+
+    if "announcement_timing" in events_df.columns:
+        timing = events_df["announcement_timing"].astype("string").str.strip().str.upper()
+        session = pd.Series("next_day", index=events_df.index, dtype="string")
+        session.loc[timing.eq("BMO")] = "same_day"
+        return session
+
+    return pd.Series("same_day", index=events_df.index, dtype="string")
+
+
+def _resolve_forward_anchor_dates(
+    events_df: pd.DataFrame,
+    price_dates_by_ticker: dict[str, pd.DatetimeIndex],
+    *,
+    baseline_date_col: str | None = None,
+) -> pd.Series:
+    if baseline_date_col is not None:
+        _raise_missing_columns(events_df, [baseline_date_col])
+        return pd.to_datetime(events_df[baseline_date_col], errors="coerce").dt.normalize()
+
+    if "post_event_date" in events_df.columns:
+        return pd.to_datetime(events_df["post_event_date"], errors="coerce").dt.normalize()
+
+    event_dates = pd.to_datetime(events_df["event_date"], errors="coerce").dt.normalize()
+    mapped_session = _resolve_mapped_session(events_df)
+    anchor_dates = pd.Series(pd.NaT, index=events_df.index, dtype="datetime64[ns]")
+
+    for idx, ticker in events_df["ticker"].items():
+        event_date = event_dates.loc[idx]
+        if pd.isna(event_date):
+            continue
+
+        price_dates = price_dates_by_ticker.get(str(ticker))
+        if price_dates is None or len(price_dates) == 0:
+            continue
+
+        session = mapped_session.loc[idx]
+        insert_pos = price_dates.searchsorted(event_date, side="left")
+        if session == "same_day":
+            if insert_pos < len(price_dates):
+                anchor_dates.loc[idx] = price_dates[insert_pos]
+        else:
+            next_pos = price_dates.searchsorted(event_date, side="right")
+            if next_pos < len(price_dates):
+                anchor_dates.loc[idx] = price_dates[next_pos]
+
+    return anchor_dates
+
+
 def _valid_research_mask(events_df: pd.DataFrame) -> pd.Series:
     mask = pd.Series(True, index=events_df.index, dtype=bool)
 
@@ -78,6 +136,81 @@ def _valid_research_mask(events_df: pd.DataFrame) -> pd.Series:
         mask &= _coerce_bool(events_df["price_alignment_valid"])
 
     return mask
+
+
+def add_forward_close_columns(
+    events_df: pd.DataFrame,
+    prices_df: pd.DataFrame,
+    *,
+    windows: Sequence[int] = DEFAULT_WINDOWS,
+    baseline_date_col: str | None = None,
+) -> pd.DataFrame:
+    """Add forward close columns from an already-local ticker/date/close price panel.
+
+    Expected contracts:
+    - `events_df` must include `event_id`, `ticker`, and `event_date`
+    - `prices_df` must include `ticker`, `date`, and `close`
+    - If `post_event_date` is present, it is used as the forward baseline date
+    - Otherwise, the helper falls back to `mapped_session` or `announcement_timing`
+      to infer whether the forward baseline should start on the same trading day
+      or the next trading day after `event_date`
+    """
+    if events_df is None or prices_df is None:
+        raise ValueError("events_df and prices_df must be provided.")
+
+    _raise_missing_columns(events_df, ["event_id", "ticker", "event_date"])
+    _raise_missing_columns(prices_df, PRICE_REQUIRED_COLUMNS)
+
+    out = events_df.copy()
+    out["ticker"] = _normalize_tickers(out["ticker"])
+    out["event_date"] = pd.to_datetime(out["event_date"], errors="coerce").dt.normalize()
+
+    prices = prices_df.copy()
+    prices["ticker"] = _normalize_tickers(prices["ticker"])
+    prices["date"] = pd.to_datetime(prices["date"], errors="coerce").dt.normalize()
+    prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
+    prices = prices.dropna(subset=["ticker", "date"]).sort_values(["ticker", "date"]).reset_index(drop=True)
+    prices = prices.drop_duplicates(subset=["ticker", "date"], keep="last")
+
+    price_dates_by_ticker = {
+        ticker: pd.DatetimeIndex(group["date"])
+        for ticker, group in prices.groupby("ticker", sort=False, dropna=False)
+    }
+    close_by_key = prices.set_index(["ticker", "date"])["close"]
+
+    anchor_dates = _resolve_forward_anchor_dates(
+        out,
+        price_dates_by_ticker,
+        baseline_date_col=baseline_date_col,
+    )
+    out["forward_anchor_date"] = anchor_dates
+
+    for window in windows:
+        forward_col = f"forward_close_{window}d"
+        out[forward_col] = pd.NA
+
+        for idx, ticker in out["ticker"].items():
+            anchor_date = anchor_dates.loc[idx]
+            if pd.isna(anchor_date):
+                continue
+
+            price_dates = price_dates_by_ticker.get(str(ticker))
+            if price_dates is None or len(price_dates) == 0:
+                continue
+
+            anchor_pos = price_dates.searchsorted(anchor_date, side="left")
+            if anchor_pos >= len(price_dates) or price_dates[anchor_pos] != anchor_date:
+                continue
+
+            forward_pos = anchor_pos + int(window)
+            if forward_pos >= len(price_dates):
+                continue
+
+            forward_date = price_dates[forward_pos]
+            close_value = close_by_key.get((str(ticker), forward_date), pd.NA)
+            out.at[idx, forward_col] = close_value
+
+    return out
 
 
 def calculate_announcement_reaction(

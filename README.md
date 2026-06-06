@@ -31,6 +31,8 @@ Expected PEAD input contract:
 - Forward drift columns for each requested window: `forward_close_{N}d`
 - Optional validity filters when present: `valid_event`, `price_alignment_valid`
 
+If your validated event artifact does not already include `forward_close_{N}d`, the PEAD module now includes an offline helper that derives those columns from a local price panel with `ticker`, `date`, and `close`. The script can use that helper directly via `--prices-path`.
+
 Offline test command:
 
 ```powershell
@@ -41,4 +43,10 @@ Research script command:
 
 ```powershell
 python scripts\run_pead_research.py --clean-events-path data\outputs\test_batch\clean_events.parquet --output-dir outputs\research
+```
+
+With a local price panel:
+
+```powershell
+python scripts\run_pead_research.py --clean-events-path data\outputs\test_batch\clean_events.parquet --prices-path data\outputs\local_prices.parquet --output-dir outputs\research
 ```
