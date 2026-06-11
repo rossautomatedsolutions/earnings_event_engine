@@ -249,6 +249,14 @@ class PeadResearchTest(unittest.TestCase):
 
             pd.testing.assert_frame_equal(_read_table(parquet_path), expected)
 
+    def test_read_table_rejects_path_without_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            no_suffix_path = Path(tmp_dir) / "events"
+            no_suffix_path.write_text("event_id,ticker\n1,AAPL\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
+                _read_table(no_suffix_path)
+
     def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
