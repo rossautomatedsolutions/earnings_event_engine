@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -178,6 +180,70 @@ class PeadResearchTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "forward_close_3d"):
             calculate_forward_drift(with_reaction, windows=(1, 3))
+
+    def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            events_path = tmp_path / "events.csv"
+            prices_path = tmp_path / "prices.csv"
+            output_dir = tmp_path / "outputs"
+
+            pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "event_date": ["2025-01-30"],
+                    "pre_close": [100.0],
+                    "post_close": [110.0],
+                    "mapped_session": ["next_day"],
+                    "valid_event": [True],
+                    "price_alignment_valid": [True],
+                }
+            ).to_csv(events_path, index=False)
+
+            pd.DataFrame(
+                {
+                    "ticker": ["AAPL", "AAPL", "AAPL"],
+                    "date": ["2025-01-30", "2025-01-31", "2025-02-03"],
+                    "close": [108.0, 110.0, 112.0],
+                }
+            ).to_csv(prices_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_pead_research.py"),
+                    "--clean-events-path",
+                    str(events_path),
+                    "--prices-path",
+                    str(prices_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--windows",
+                    "1",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+
+            event_returns_path = output_dir / "pead_event_returns.csv"
+            bucket_summary_path = output_dir / "pead_bucket_summary.csv"
+            summary_md_path = output_dir / "pead_summary.md"
+
+            self.assertTrue(event_returns_path.exists())
+            self.assertTrue(bucket_summary_path.exists())
+            self.assertTrue(summary_md_path.exists())
+
+            event_returns = pd.read_csv(event_returns_path)
+            self.assertIn("forward_close_1d", event_returns.columns)
+            self.assertIn("forward_return_1d", event_returns.columns)
+            self.assertFalse(pd.isna(event_returns.loc[0, "forward_close_1d"]))
+            self.assertAlmostEqual(float(event_returns.loc[0, "forward_close_1d"]), 112.0)
+            self.assertAlmostEqual(float(event_returns.loc[0, "forward_return_1d"]), 112.0 / 110.0 - 1.0)
 
 
 if __name__ == "__main__":
