@@ -340,6 +340,51 @@ class PeadResearchTest(unittest.TestCase):
             self.assertIn("post_close", error_text)
             self.assertIn("announcement_close", error_text)
 
+    def test_run_pead_research_cli_fails_clearly_when_post_close_override_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            events_path = tmp_path / "events.csv"
+            output_dir = tmp_path / "outputs"
+
+            pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "event_date": ["2025-01-30"],
+                    "pre_close": [100.0],
+                    "post_close": [110.0],
+                    "mapped_session": ["next_day"],
+                    "valid_event": [True],
+                    "price_alignment_valid": [True],
+                    "forward_close_1d": [112.0],
+                }
+            ).to_csv(events_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_pead_research.py"),
+                    "--clean-events-path",
+                    str(events_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--windows",
+                    "1",
+                    "--post-close-col",
+                    "nonexistent_post_close",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
+            error_text = f"{result.stdout}\n{result.stderr}"
+            self.assertIn("missing required columns", error_text)
+            self.assertIn("nonexistent_post_close", error_text)
+
 
 if __name__ == "__main__":
     unittest.main()
