@@ -22,6 +22,7 @@ from earnings_event_engine.research import (
     calculate_forward_drift,
     summarize_pead_by_bucket,
 )
+from scripts.run_pead_research import _read_table
 
 
 class PeadResearchTest(unittest.TestCase):
@@ -180,6 +181,50 @@ class PeadResearchTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "forward_close_3d"):
             calculate_forward_drift(with_reaction, windows=(1, 3))
+
+    def test_read_table_loads_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "events.csv"
+            expected = pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "pre_close": [100.0],
+                }
+            )
+            expected.to_csv(csv_path, index=False)
+
+            observed = _read_table(csv_path)
+
+            pd.testing.assert_frame_equal(observed, expected)
+
+    def test_read_table_loads_parquet_when_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            parquet_path = Path(tmp_dir) / "events.parquet"
+            expected = pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "pre_close": [100.0],
+                }
+            )
+
+            try:
+                expected.to_parquet(parquet_path, index=False)
+            except (ImportError, ModuleNotFoundError, ValueError, OSError) as exc:
+                self.skipTest(f"Parquet support unavailable in current environment: {exc}")
+
+            observed = _read_table(parquet_path)
+
+            pd.testing.assert_frame_equal(observed, expected)
+
+    def test_read_table_rejects_unsupported_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            unsupported_path = Path(tmp_dir) / "events.txt"
+            unsupported_path.write_text("event_id,ticker\n1,AAPL\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
+                _read_table(unsupported_path)
 
     def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
