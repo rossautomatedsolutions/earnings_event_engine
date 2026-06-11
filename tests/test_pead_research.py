@@ -226,6 +226,29 @@ class PeadResearchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
                 _read_table(unsupported_path)
 
+    def test_read_table_treats_supported_suffixes_case_insensitively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            expected = pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "pre_close": [100.0],
+                }
+            )
+
+            csv_path = tmp_path / "events.CSV"
+            expected.to_csv(csv_path, index=False)
+            pd.testing.assert_frame_equal(_read_table(csv_path), expected)
+
+            parquet_path = tmp_path / "events.PARQUET"
+            try:
+                expected.to_parquet(parquet_path, index=False)
+            except (ImportError, ModuleNotFoundError, ValueError, OSError):
+                return
+
+            pd.testing.assert_frame_equal(_read_table(parquet_path), expected)
+
     def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
