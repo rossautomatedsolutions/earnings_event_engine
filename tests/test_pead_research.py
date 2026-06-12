@@ -265,6 +265,22 @@ class PeadResearchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
                 _read_table(dotted_unsupported_path)
 
+    def test_read_table_loads_multi_dot_csv_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            multi_dot_csv_path = Path(tmp_dir) / "events.backup.csv"
+            expected = pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "pre_close": [100.0],
+                }
+            )
+            expected.to_csv(multi_dot_csv_path, index=False)
+
+            observed = _read_table(multi_dot_csv_path)
+
+            pd.testing.assert_frame_equal(observed, expected)
+
     def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
