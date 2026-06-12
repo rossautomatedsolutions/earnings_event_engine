@@ -313,6 +313,22 @@ class PeadResearchTest(unittest.TestCase):
 
             pd.testing.assert_frame_equal(observed, expected)
 
+    def test_read_table_loads_hidden_dot_uppercase_csv_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            hidden_dot_uppercase_csv_path = Path(tmp_dir) / ".events.CSV"
+            expected = pd.DataFrame(
+                {
+                    "event_id": [1],
+                    "ticker": ["AAPL"],
+                    "pre_close": [100.0],
+                }
+            )
+            expected.to_csv(hidden_dot_uppercase_csv_path, index=False)
+
+            observed = _read_table(hidden_dot_uppercase_csv_path)
+
+            pd.testing.assert_frame_equal(observed, expected)
+
     def test_run_pead_research_cli_derives_forward_close_from_local_prices_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
