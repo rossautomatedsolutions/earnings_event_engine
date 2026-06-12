@@ -265,6 +265,14 @@ class PeadResearchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
                 _read_table(dotted_unsupported_path)
 
+    def test_read_table_rejects_trailing_dot_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trailing_dot_path = Path(tmp_dir) / "events."
+            trailing_dot_path.write_text("event_id,ticker\n1,AAPL\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported input format|\\.parquet or \\.csv"):
+                _read_table(trailing_dot_path)
+
     def test_read_table_loads_multi_dot_csv_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             multi_dot_csv_path = Path(tmp_dir) / "events.backup.csv"
