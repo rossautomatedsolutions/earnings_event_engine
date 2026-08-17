@@ -50,7 +50,17 @@ What the fixture does **not** prove:
 - live data availability or market-data quality
 - correctness of historical option snapshots
 - trading profitability or research efficacy
-- resolution of the separate historical IV leakage issue in `run_analysis.py`
+
+## Historical IV Caveat
+
+`run_analysis.py` no longer reuses a current option-chain IV snapshot across historical earnings rows.
+
+- Historical price-based outputs remain valid without options data: realized move, signed move, pre/post price alignment, and realized-volatility context.
+- Historical IV-dependent outputs now require explicit event-time IV inputs keyed to the earnings event date.
+- When event-time IV inputs are missing, `run_analysis.py` leaves IV-dependent fields unavailable instead of silently substituting current data.
+- Any event-time return metric in `run_analysis.py` is an expected-move/volatility proxy, not observed historical straddle P&L.
+- Actual historical option-return analysis requires event-time option premium snapshots.
+- Any old historical outputs generated before this containment change that treated a current option chain as event-time IV should be considered stale and invalid for research conclusions.
 
 ## Zero-Row Failure Semantics
 
