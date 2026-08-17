@@ -24,10 +24,17 @@ for path in (REPO_ROOT, SRC_PATH):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from data.earnings_calendar import EarningsCalendarRetrievalError
 from earnings_event_engine.utils.debug_logger import log_event
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
 from scripts.run_event_pipeline_test import (
+    _append_summary_metric,
+    _base_diagnostics_summary,
+    _build_failure_counts,
     _build_coverage_input_df,
+    _empty_events_frame,
+    _empty_diagnostics_flags,
+    _empty_enriched_events_frame,
     generate_features,
     load_prices_and_compute_moves,
     retrieve_and_normalize_events,
@@ -47,8 +54,8 @@ TEST_TICKERS = [
     "RCL", "NCLH", "DAL", "UAL", "ETSY", "DKNG", "PINS", "ROKU", "HOOD", "SOFI",
     "CVNA", "RIVN", "SNAP", "CHWY", "U", "TWLO", "FSLY", "AFRM", "CROX", "ONON",
 ]
-START_DATE = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=365 * 2)
-END_DATE = pd.Timestamp.utcnow().normalize()
+START_DATE = pd.Timestamp.now("UTC").normalize() - pd.Timedelta(days=365 * 2)
+END_DATE = pd.Timestamp.now("UTC").normalize()
 MAX_EVENTS = 240
 OUTPUT_DIR = REPO_ROOT / "data" / "outputs" / "test_batch"
 
@@ -120,12 +127,45 @@ def safe_to_parquet(df: pd.DataFrame, path: Path) -> None:
     df.to_parquet(path, index=False)
 
 
+def build_output_artifacts(
+    *,
+    events: pd.DataFrame,
+    events_with_prices: pd.DataFrame,
+    options_df: pd.DataFrame,
+    final_features: pd.DataFrame,
+    clean_events: pd.DataFrame,
+    diagnostics_output: pd.DataFrame,
+    diagnostics_flags: pd.DataFrame,
+    coverage_output: pd.DataFrame,
+    coverage_by_ticker: pd.DataFrame,
+    coverage_by_year: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """Keep the core artifact contract aligned with run_event_pipeline_test.py."""
+    return {
+        "events.parquet": events,
+        "events_with_prices.parquet": events_with_prices,
+        "options.parquet": options_df,
+        "features.parquet": final_features,
+        "clean_events.parquet": clean_events,
+        "diagnostics.parquet": diagnostics_output,
+        "diagnostics_flags.parquet": diagnostics_flags,
+        "coverage_summary.parquet": coverage_output,
+        "coverage_by_ticker.parquet": coverage_by_ticker,
+        "coverage_by_year.parquet": coverage_by_year,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a small-batch earnings pipeline test.")
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable per-event diagnostics and verbose failure logging.",
+    )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Allow zero raw or zero validated rows without returning a non-zero exit code.",
     )
     return parser.parse_args()
 
@@ -189,67 +229,94 @@ def main() -> None:
         },
     )
 
-    events = retrieve_and_normalize_events(TEST_TICKERS, START_DATE, END_DATE, MAX_EVENTS)
-    log_event("events", "Retrieved earnings events", {"event_count": len(events)})
-
-    events_with_prices = load_prices_and_compute_moves(events)
-    log_event("prices", "Loaded price windows and computed move fields", {"event_count": len(events_with_prices)})
-
-    options_df = build_synthetic_options(events_with_prices, debug=args.debug)
-    log_event("options", "Built synthetic options snapshots", {"option_rows": len(options_df)})
-
+    events = _empty_events_frame()
+    events_with_prices = _empty_enriched_events_frame()
+    options_df = pd.DataFrame(
+        columns=["event_id", "option_type", "strike", "underlying_price", "bid", "ask", "mid"]
+    )
     features_df = generate_features(events_with_prices)
-    log_event("features", "Generated features", {"feature_rows": len(features_df)})
+    clean_events = events_with_prices.copy()
+    diagnostics_summary = _base_diagnostics_summary()
+    diagnostics_flags = _empty_diagnostics_flags()
+    coverage_summary = diagnostics_summary.copy()
+    coverage_by_ticker = pd.DataFrame(columns=["ticker", "num_events"])
+    coverage_by_year = pd.DataFrame(columns=["event_year", "events_per_year"])
+    runtime_metrics: list[str] = []
+    failure_messages: list[str] = []
 
-    if events_with_prices.empty:
-        clean_events = events_with_prices.copy()
-        diagnostics_summary = pd.DataFrame(
-            [
-                {"category": "overview", "metric": "total_events", "count": 0, "pct_of_events": 0.0},
-                {"category": "overview", "metric": "valid_events", "count": 0, "pct_of_events": 0.0},
-                {"category": "overview", "metric": "invalid_events", "count": 0, "pct_of_events": 0.0},
-            ]
-        )
-        diagnostics_flags = pd.DataFrame(
-            columns=["event_id", "invalid_event", "valid_event", "failure_reasons"]
-        )
-        coverage_summary = diagnostics_summary.copy()
-        coverage_by_ticker = pd.DataFrame(columns=["ticker", "num_events"])
-        coverage_by_year = pd.DataFrame(columns=["event_year", "events_per_year"])
-    else:
-        options_for_validation = options_df if not options_df.empty else None
+    try:
+        events = retrieve_and_normalize_events(TEST_TICKERS, START_DATE, END_DATE, MAX_EVENTS)
+        log_event("events", "Retrieved earnings events", {"event_count": len(events)})
 
-        clean_events, diagnostics_summary, diagnostics_flags = run_event_diagnostics(
-            events_with_prices,
-            options_df=options_for_validation,
-            event_key_col="event_id",
-            pre_close_col="pre_close",
-            post_open_col="post_open",
-            post_close_col="post_close",
-            implied_move_col="implied_move",
-            timing_col="announcement_timing",
-            mapped_session_col="mapped_session",
-        )
+        events_with_prices = load_prices_and_compute_moves(events)
+        log_event("prices", "Loaded price windows and computed move fields", {"event_count": len(events_with_prices)})
 
-        coverage_report = build_data_coverage_report(
-            _build_coverage_input_df(diagnostics_flags, events_with_prices),
-            ticker_col="ticker",
-            event_date_col="event_date",
-            price_valid_col="price_alignment_valid",
-            timing_col="announcement_timing",
-            mapped_session_col="mapped_session",
-        )
-        coverage_summary = coverage_report.summary
-        coverage_by_ticker = coverage_report.by_ticker
-        coverage_by_year = coverage_report.by_year
-        print("[DEBUG] Coverage Summary:")
-        print(coverage_summary)
+        options_df = build_synthetic_options(events_with_prices, debug=args.debug)
+        log_event("options", "Built synthetic options snapshots", {"option_rows": len(options_df)})
+
+        features_df = generate_features(events_with_prices)
+        log_event("features", "Generated features", {"feature_rows": len(features_df)})
+
+        if not events_with_prices.empty:
+            options_for_validation = options_df if not options_df.empty else None
+
+            clean_events, diagnostics_summary, diagnostics_flags = run_event_diagnostics(
+                events_with_prices,
+                options_df=options_for_validation,
+                event_key_col="event_id",
+                pre_close_col="pre_close",
+                post_open_col="post_open",
+                post_close_col="post_close",
+                implied_move_col="implied_move",
+                timing_col="announcement_timing",
+                mapped_session_col="mapped_session",
+            )
+
+            coverage_report = build_data_coverage_report(
+                _build_coverage_input_df(diagnostics_flags, events_with_prices),
+                ticker_col="ticker",
+                event_date_col="event_date",
+                price_valid_col="price_alignment_valid",
+                timing_col="announcement_timing",
+                mapped_session_col="mapped_session",
+            )
+            coverage_summary = coverage_report.summary
+            coverage_by_ticker = coverage_report.by_ticker
+            coverage_by_year = coverage_report.by_year
+            print("[DEBUG] Coverage Summary:")
+            print(coverage_summary)
+    except EarningsCalendarRetrievalError as exc:
+        failure_messages.append(str(exc))
+        runtime_metrics.append("retrieval_failure")
+        log_event("events", "Earnings retrieval failed", {"error": str(exc)})
 
     final_features = features_df.merge(
         diagnostics_flags[["event_id", "valid_event", "invalid_event", "failure_reasons"]],
         on="event_id",
         how="left",
     )
+
+    raw_event_count = len(events)
+    valid_event_count = len(clean_events)
+    feature_row_count = len(final_features)
+
+    if raw_event_count == 0:
+        runtime_metrics.append("zero_raw_events")
+        if not args.allow_empty and not failure_messages:
+            failure_messages.append("Zero raw events produced during the retrieval stage in live mode.")
+
+    if raw_event_count > 0 and valid_event_count == 0:
+        runtime_metrics.append("zero_valid_events")
+        if not args.allow_empty:
+            failure_messages.append("Zero valid/clean events produced during the validation stage in live mode.")
+
+    diagnostics_output = diagnostics_summary.copy()
+    coverage_output = coverage_summary.copy()
+    for metric in runtime_metrics:
+        if metric not in diagnostics_output["metric"].tolist():
+            diagnostics_output = _append_summary_metric(diagnostics_output, metric)
+        if metric not in coverage_output["metric"].tolist():
+            coverage_output = _append_summary_metric(coverage_output, metric)
 
     failed_events = diagnostics_flags.loc[diagnostics_flags["invalid_event"].fillna(False)].copy()
     if not failed_events.empty:
@@ -259,15 +326,26 @@ def main() -> None:
     if args.debug and not events_with_prices.empty:
         _print_debug_diagnostics(events_with_prices, features_df, diagnostics_flags)
 
+    failure_counts = _build_failure_counts(diagnostics_flags)
+    if not failure_counts.empty:
+        failures = failure_counts.rename(columns={"failure_reason": "metric"}).copy()
+        failures.insert(0, "category", "failure_counts")
+        failures["pct_of_events"] = failures["count"] / max(len(diagnostics_flags), 1)
+        diagnostics_output = pd.concat([diagnostics_output, failures], ignore_index=True, sort=False)
+
     print("\n=== Diagnostics summary ===")
-    print(diagnostics_summary.sort_values(["category", "metric"]).to_string(index=False))
+    print(diagnostics_output.sort_values(["category", "metric"]).to_string(index=False))
 
     print("\n=== Coverage summary ===")
-    if "category" in coverage_summary.columns:
-        coverage_summary = coverage_summary.sort_values(["category", "metric"])
+    if "category" in coverage_output.columns:
+        coverage_output = coverage_output.sort_values(["category", "metric"])
     else:
-        coverage_summary = coverage_summary.sort_values(["metric"])
-    print(coverage_summary.to_string(index=False))
+        coverage_output = coverage_output.sort_values(["metric"])
+    print(coverage_output.to_string(index=False))
+
+    print(f"\n[INFO] raw_events={raw_event_count}")
+    print(f"[INFO] clean_events={valid_event_count}")
+    print(f"[INFO] feature_rows={feature_row_count}")
 
     print("\n=== Sample output rows (events) ===")
     event_sample_cols = [
@@ -280,7 +358,10 @@ def main() -> None:
         "implied_move",
     ]
     present_event_cols = [c for c in event_sample_cols if c in events_with_prices.columns]
-    print(events_with_prices[present_event_cols].head(8).round(4).to_string(index=False))
+    event_display = events_with_prices[present_event_cols].head(8).copy()
+    event_numeric_cols = event_display.select_dtypes(include=[np.number]).columns
+    event_display.loc[:, event_numeric_cols] = event_display.loc[:, event_numeric_cols].round(4)
+    print(event_display.to_string(index=False))
 
     print("\n=== Sample output rows (features) ===")
     feature_sample_cols = [
@@ -293,33 +374,35 @@ def main() -> None:
         "failure_reasons",
     ]
     present_feature_cols = [c for c in feature_sample_cols if c in final_features.columns]
-    print(final_features[present_feature_cols].head(8).round(4).to_string(index=False))
+    feature_display = final_features[present_feature_cols].head(8).copy()
+    feature_numeric_cols = feature_display.select_dtypes(include=[np.number]).columns
+    feature_display.loc[:, feature_numeric_cols] = feature_display.loc[:, feature_numeric_cols].round(4)
+    print(feature_display.to_string(index=False))
 
     log_event("validation", "Validation complete", {"valid_events": int(diagnostics_flags["valid_event"].sum())})
 
-    safe_to_parquet(events_with_prices, OUTPUT_DIR / "events.parquet")
-    safe_to_parquet(options_df, OUTPUT_DIR / "options.parquet")
-    safe_to_parquet(final_features, OUTPUT_DIR / "features.parquet")
-    safe_to_parquet(clean_events, OUTPUT_DIR / "clean_events.parquet")
-    safe_to_parquet(diagnostics_summary, OUTPUT_DIR / "diagnostics.parquet")
-    safe_to_parquet(diagnostics_flags, OUTPUT_DIR / "diagnostics_flags.parquet")
-    safe_to_parquet(coverage_summary, OUTPUT_DIR / "coverage_summary.parquet")
-    safe_to_parquet(coverage_by_ticker, OUTPUT_DIR / "coverage_by_ticker.parquet")
-    safe_to_parquet(coverage_by_year, OUTPUT_DIR / "coverage_by_year.parquet")
+    artifacts = build_output_artifacts(
+        events=events,
+        events_with_prices=events_with_prices,
+        options_df=options_df,
+        final_features=final_features,
+        clean_events=clean_events,
+        diagnostics_output=diagnostics_output,
+        diagnostics_flags=diagnostics_flags,
+        coverage_output=coverage_output,
+        coverage_by_ticker=coverage_by_ticker,
+        coverage_by_year=coverage_by_year,
+    )
+
+    for artifact_name, artifact_df in artifacts.items():
+        safe_to_parquet(artifact_df, OUTPUT_DIR / artifact_name)
 
     print("\nArtifacts written:")
-    for artifact in [
-        "events.parquet",
-        "options.parquet",
-        "features.parquet",
-        "clean_events.parquet",
-        "diagnostics.parquet",
-        "diagnostics_flags.parquet",
-        "coverage_summary.parquet",
-        "coverage_by_ticker.parquet",
-        "coverage_by_year.parquet",
-    ]:
-        print(f"- {OUTPUT_DIR / artifact}")
+    for artifact_name in artifacts:
+        print(f"- {OUTPUT_DIR / artifact_name}")
+
+    if failure_messages:
+        raise SystemExit("\n".join(failure_messages))
 
 
 if __name__ == "__main__":
