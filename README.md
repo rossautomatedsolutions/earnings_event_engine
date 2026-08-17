@@ -6,6 +6,52 @@ Lightweight tooling for running and validating the earnings event pipeline, incl
 
 - `scripts/run_small_batch_test.py`
 - `scripts/run_event_pipeline_test.py`
+- `scripts/run_full_research_pipeline.py`
+
+## Full Research Orchestrator
+
+`scripts/run_full_research_pipeline.py` is the honest orchestration layer for the canonical multi-stage research run.
+
+Deterministic offline command:
+
+```powershell
+python scripts\run_full_research_pipeline.py --fixture-dir tests\fixtures\offline_pipeline --output-dir outputs\full_research_fixture
+```
+
+Required stages in the canonical run:
+
+- `event_pipeline`: runs `scripts/run_event_pipeline_test.py` in fixture or live mode, validates `events.parquet`, `clean_events.parquet`, `features.parquet`, and `diagnostics.parquet`, and derives `validated_features.parquet` for downstream research
+- `earnings_analysis`: runs `analysis.earnings_analysis.run_full_analysis()` on the validated-only research subset
+- `strategy_simulation`: runs `strategies.straddle_simulator.run_straddle_analysis()` on the validated-only research subset
+- `conditional_analysis`: runs `analysis.conditional_analysis.run_conditional_analysis()` on the strategy results
+
+Optional stage:
+
+- `visualizations`: enabled only with `--run-visuals`; this is intentionally excluded from the default contract because it depends on `matplotlib` and is reporting-only rather than core research/data plumbing
+
+Exit semantics:
+
+- `SUCCESS`: every selected required stage completed and its required upstream artifacts were present, readable, schema-valid, and non-empty
+- `FAILED`: any required stage failed, any required artifact was missing or malformed, or a user-selected optional stage could not run
+
+Mode behavior:
+
+- `--fixture-dir ...`: deterministic offline mode using only local fixtures; it never falls back to live data
+- no `--fixture-dir`: live mode; this requires `--tickers`
+
+What deterministic full-run success proves:
+
+- orchestration wiring is honest end to end
+- the validated pipeline artifact contract is produced and the validated-only research subset is what downstream stages actually consume
+- the required research stages can complete without network access when fixtures are supplied
+
+What deterministic full-run success does **not** prove:
+
+- live market-data availability
+- plotting support unless `--run-visuals` is explicitly enabled and succeeds
+- research efficacy, profitability, or production readiness
+
+`scripts/run_pead_research.py` remains a separate explicit research entry point. It is not part of the canonical full orchestrator because it depends on clean-event and price-panel research inputs that are adjacent to, but not guaranteed by, the core feature-artifact contract.
 
 ## Live vs Offline Validation
 
@@ -24,14 +70,19 @@ The fixture run writes:
 
 - `events.parquet`: normalized raw events before price enrichment and validation
 - `clean_events.parquet`: validated clean events
-- `features.parquet`: analysis-ready feature artifact
+- `features.parquet`: feature-level audit artifact that may still include invalid rows, with validation flags attached
 - `diagnostics.parquet`: overview plus runtime/failure diagnostics
+
+When `scripts/run_full_research_pipeline.py` runs successfully, it also writes:
+
+- `validated_features.parquet`: validated-only feature rows derived from `features.parquet` using the canonical `valid_event` flag and cross-checked against `clean_events.parquet`
 
 Core artifact contract shared by both entry points:
 
 - `events.parquet`: normalized raw events after retrieval or fixture loading
 - `clean_events.parquet`: validated clean events
-- `features.parquet`: enriched feature-level rows used downstream
+- `features.parquet`: enriched feature-level rows retained for diagnostics and auditability, including invalid rows when present
+- `validated_features.parquet`: orchestrator-only artifact used by required downstream research stages
 
 Additional live small-batch artifacts from `scripts/run_small_batch_test.py`:
 
@@ -43,7 +94,7 @@ What the fixture proves:
 
 - pipeline wiring works end to end without network access
 - the event, clean-event, and feature artifact contracts are non-empty and stable
-- downstream `analysis.earnings_analysis.run_full_analysis()` can consume the produced feature artifact
+- the full orchestrator can restrict downstream research to validated feature rows only
 
 What the fixture does **not** prove:
 
