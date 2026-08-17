@@ -23,11 +23,18 @@ for path in (REPO_ROOT, SRC_PATH):
 
 from data.earnings_calendar import EarningsCalendarRetrievalError, get_earnings_dates
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
+from src.events import align_event_to_sessions
+from src.events.timing import (
+    TIMING_COLUMN_CANDIDATES,
+    normalize_announcement_timing,
+    resolve_announcement_timing,
+    strip_series_timezone_preserving_wall_clock,
+    strip_timezone_preserving_wall_clock,
+)
 from utils.datetime_utils import (
     assert_same_timezone,
     normalize_datetime_index,
     to_naive,
-    to_naive_datetime,
     validate_datetime,
 )
 
@@ -202,48 +209,52 @@ def load_fixture_tables(fixture_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, 
     return events_df, prices_df, options_df
 
 
-def _infer_timing(earnings_ts: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(earnings_ts, errors="coerce")
-    naive = parsed.where(parsed.isna(), parsed.map(to_naive))
-    hours = naive.dt.hour
-    # yfinance often returns timestamps where earlier hours are BMO-like and later AMC-like.
-    inferred = np.where(hours.fillna(16) < 12, "BMO", "AMC")
-    return pd.Series(inferred, index=earnings_ts.index, dtype="object")
+def _has_text(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except TypeError:
+        pass
+    return bool(str(value).strip())
 
 
-def _normalize_timing(events: pd.DataFrame) -> pd.Series:
-    timing_aliases = {
-        "amc": "AMC",
-        "after market close": "AMC",
-        "after_close": "AMC",
-        "post_market": "AMC",
-        "post-close": "AMC",
-        "post_close": "AMC",
-        "bmo": "BMO",
-        "before market open": "BMO",
-        "before_open": "BMO",
-        "pre_market": "BMO",
-        "pre-open": "BMO",
-        "pre_open": "BMO",
-    }
-    timing_cols = [
-        col
-        for col in ("timing", "announcement_timing", "earnings_timing", "time_of_day", "session")
-        if col in events.columns
-    ]
-
-    normalized = pd.Series("UNKNOWN", index=events.index, dtype="object")
+def _resolve_event_timing(row: pd.Series, timing_cols: list[str]) -> str | None:
+    explicit_unsupported_raw: object | None = None
     for col in timing_cols:
-        raw = events[col].astype("string").str.strip().str.lower()
-        mapped = raw.map(timing_aliases).fillna("UNKNOWN")
-        normalized = np.where(normalized.eq("UNKNOWN"), mapped, normalized)
-        normalized = pd.Series(normalized, index=events.index, dtype="object")
+        raw_value = row.get(col)
+        normalized = normalize_announcement_timing(raw_value)
+        if normalized is not None:
+            return normalized
+        if explicit_unsupported_raw is None and _has_text(raw_value):
+            explicit_unsupported_raw = raw_value
 
-    inferred = _infer_timing(events["earnings_date"])
-    missing = normalized.eq("UNKNOWN")
-    normalized.loc[missing] = inferred.loc[missing]
-    normalized = normalized.fillna("AMC")
-    return normalized.replace("UNKNOWN", "AMC")
+    resolution = resolve_announcement_timing(explicit_unsupported_raw, row.get("earnings_date"))
+    return resolution.timing
+
+
+def _normalize_timing(events: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    timing_cols = [col for col in TIMING_COLUMN_CANDIDATES if col in events.columns]
+
+    resolved_timing: list[object] = []
+    mapped_sessions: list[object] = []
+    for _, row in events.iterrows():
+        timing = _resolve_event_timing(row, timing_cols)
+        if timing == "BMO":
+            resolved_timing.append("BMO")
+            mapped_sessions.append("same_day")
+        elif timing == "AMC":
+            resolved_timing.append("AMC")
+            mapped_sessions.append("next_day")
+        else:
+            resolved_timing.append(pd.NA)
+            mapped_sessions.append(pd.NA)
+
+    return (
+        pd.Series(resolved_timing, index=events.index, dtype="object"),
+        pd.Series(mapped_sessions, index=events.index, dtype="object"),
+    )
 
 
 def _normalize_events_frame(
@@ -272,9 +283,7 @@ def _normalize_events_frame(
         if working.empty:
             return _empty_events_frame()
 
-    working["earnings_date"] = pd.to_datetime(working["earnings_date"], errors="coerce")
-    if hasattr(working["earnings_date"].dt, "tz") and working["earnings_date"].dt.tz is not None:
-        working["earnings_date"] = working["earnings_date"].dt.tz_convert(None)
+    working["earnings_date"] = strip_series_timezone_preserving_wall_clock(working["earnings_date"])
 
     parsed_earnings = pd.to_datetime(working["earnings_date"], errors="coerce")
     working = working.loc[parsed_earnings.notna()].copy()
@@ -293,9 +302,8 @@ def _normalize_events_frame(
 
     working["ticker"] = working["ticker"].astype(str).str.upper()
     working["event_date"] = working["earnings_date"].dt.normalize()
-    working["timing"] = _normalize_timing(working)
+    working["timing"], working["mapped_session"] = _normalize_timing(working)
     working["announcement_timing"] = working["timing"]
-    working["mapped_session"] = np.where(working["timing"].eq("BMO"), "same_day", "next_day")
 
     working = (
         working.sort_values(["event_date", "ticker"])
@@ -458,46 +466,37 @@ def load_prices_and_compute_moves(
         idx = normalize_datetime_index(history.index).sort_values()
         debug_printed = 0
         for row_idx, row in group.iterrows():
-            event_date = to_naive_datetime(row["event_date"])
-            if event_date is not None:
-                event_date = event_date.normalize()
+            event_date = strip_timezone_preserving_wall_clock(row.get("earnings_date", row["event_date"]))
 
-            if event_date is None or not isinstance(idx, pd.DatetimeIndex):
+            if pd.isna(event_date) or not isinstance(idx, pd.DatetimeIndex):
                 continue
 
             assert_same_timezone(idx, event_date)
 
-            timing = str(row.get("timing", "AMC")).upper()
-            if timing not in {"AMC", "BMO"}:
-                timing = "AMC"
+            timing = normalize_announcement_timing(row.get("announcement_timing", row.get("timing")))
+            if timing is None:
+                continue
 
-            pos = idx.searchsorted(event_date, side="left")
-            exact_match = pos < len(idx) and idx[pos] == event_date
+            alignment = align_event_to_sessions(
+                event_date=event_date,
+                announcement_timing=timing,
+                price_index=idx,
+            )
+            if alignment["alignment_flag"] != "ok":
+                continue
 
-            pre_idx = None
-            post_idx = None
-            if timing == "AMC":
-                pre_idx = pos if exact_match else pos - 1
-                post_idx = pos + 1
-            elif timing == "BMO":
-                pre_idx = pos - 1
-                post_idx = pos
+            pre_date = pd.Timestamp(alignment["pre_event_date"])
+            post_date = pd.Timestamp(alignment["post_event_date"])
 
-            has_pre = pre_idx is not None and 0 <= pre_idx < len(idx)
-            has_post = post_idx is not None and 0 <= post_idx < len(idx)
+            group.at[row_idx, "pre_close"] = history.loc[pre_date, "close"]
+            hv = history.loc[pre_date, "hv20"]
+            if isinstance(hv, pd.Series):
+                hv = hv.iloc[-1] if not hv.empty else None
+            if hv is not None and pd.notna(hv):
+                group.at[row_idx, "implied_move"] = float(hv)
 
-            if has_pre:
-                pre_date = idx[pre_idx]
-                group.at[row_idx, "pre_close"] = history.iloc[pre_idx]["close"]
-                hv = history.loc[pre_date, "hv20"]
-                if isinstance(hv, pd.Series):
-                    hv = hv.iloc[-1] if not hv.empty else None
-                if hv is not None and pd.notna(hv):
-                    group.at[row_idx, "implied_move"] = float(hv)
-
-            if has_post:
-                group.at[row_idx, "post_open"] = history.iloc[post_idx]["open"]
-                group.at[row_idx, "post_close"] = history.iloc[post_idx]["close"]
+            group.at[row_idx, "post_open"] = history.loc[post_date, "open"]
+            group.at[row_idx, "post_close"] = history.loc[post_date, "close"]
 
             pre_close = group.at[row_idx, "pre_close"]
             post_open = group.at[row_idx, "post_open"]

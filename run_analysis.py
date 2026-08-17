@@ -12,13 +12,17 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
-from datetime import time
 
 import numpy as np
 import pandas as pd
 
 from data.earnings_calendar import get_earnings_dates
 from src.events import align_event_to_sessions
+from src.events.timing import (
+    TIMING_COLUMN_CANDIDATES,
+    resolve_announcement_timing,
+    strip_series_timezone_preserving_wall_clock,
+)
 
 
 @dataclass
@@ -51,31 +55,6 @@ EVENT_ROW_COLUMNS = [
     "event_time_iv_minus_realized_pct",
     "event_time_expected_move_proxy_return_pct",
 ]
-
-_TIMING_COLUMN_CANDIDATES = (
-    "announcement_timing",
-    "timing",
-    "earnings_timing",
-    "earnings_time",
-    "time_of_day",
-    "session",
-)
-_TIMING_ALIASES = {
-    "amc": "AMC",
-    "after_close": "AMC",
-    "after_market_close": "AMC",
-    "after_market": "AMC",
-    "post_close": "AMC",
-    "post_market": "AMC",
-    "bmo": "BMO",
-    "before_open": "BMO",
-    "before_market_open": "BMO",
-    "before_market": "BMO",
-    "pre_market": "BMO",
-    "pre_open": "BMO",
-}
-_PREMARKET_CUTOFF = time(hour=9, minute=30)
-_POSTCLOSE_CUTOFF = time(hour=16, minute=0)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -166,39 +145,6 @@ def _first_present(columns: pd.Index, candidates: tuple[str, ...]) -> str | None
     return None
 
 
-def _strip_timezone_preserving_wall_clock(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce")
-    if hasattr(parsed.dt, "tz") and parsed.dt.tz is not None:
-        return parsed.dt.tz_localize(None)
-    return parsed
-
-
-def _normalize_timing_value(value: object) -> str | None:
-    if value is None or pd.isna(value):
-        return None
-
-    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
-    if not normalized:
-        return None
-    return _TIMING_ALIASES.get(normalized)
-
-
-def _infer_timing_from_timestamp(earnings_date: pd.Timestamp) -> str | None:
-    event_ts = pd.Timestamp(earnings_date)
-    if pd.isna(event_ts):
-        return None
-
-    if event_ts == event_ts.normalize():
-        return None
-
-    event_time = event_ts.time()
-    if event_time < _PREMARKET_CUTOFF:
-        return "BMO"
-    if event_time >= _POSTCLOSE_CUTOFF:
-        return "AMC"
-    return None
-
-
 def _raise_unresolvable_timing(
     *,
     ticker: str,
@@ -224,25 +170,25 @@ def _prepare_earnings_events(ticker: str, earnings_df: pd.DataFrame) -> pd.DataF
     prepared = earnings_df.copy()
     prepared["ticker"] = prepared.get("ticker", ticker)
     prepared["ticker"] = prepared["ticker"].astype("string").fillna(ticker).str.upper().str.strip()
-    prepared["earnings_date"] = _strip_timezone_preserving_wall_clock(prepared["earnings_date"])
+    prepared["earnings_date"] = strip_series_timezone_preserving_wall_clock(prepared["earnings_date"])
     prepared = prepared.dropna(subset=["earnings_date"]).copy()
 
     if prepared.empty:
         return pd.DataFrame(columns=["ticker", "earnings_date", "announcement_timing"])
 
-    timing_col = _first_present(prepared.columns, _TIMING_COLUMN_CANDIDATES)
+    timing_col = _first_present(prepared.columns, TIMING_COLUMN_CANDIDATES)
     resolved_timing: list[str] = []
     for row in prepared.itertuples(index=False):
         raw_timing = getattr(row, timing_col) if timing_col is not None else None
         ticker_value = str(getattr(row, "ticker", ticker)).strip().upper() or str(ticker).strip().upper()
         earnings_date = pd.Timestamp(getattr(row, "earnings_date"))
 
-        normalized_timing = _normalize_timing_value(raw_timing)
-        if normalized_timing is not None:
-            resolved_timing.append(normalized_timing)
+        resolution = resolve_announcement_timing(raw_timing, earnings_date)
+        if resolution.timing is not None:
+            resolved_timing.append(resolution.timing)
             continue
 
-        if raw_timing is not None and not pd.isna(raw_timing) and str(raw_timing).strip():
+        if resolution.status == "unsupported":
             _raise_unresolvable_timing(
                 ticker=ticker_value,
                 earnings_date=earnings_date,
@@ -250,19 +196,15 @@ def _prepare_earnings_events(ticker: str, earnings_df: pd.DataFrame) -> pd.DataF
                 reason="unsupported timing label; expected AMC/BMO-style session tags",
             )
 
-        inferred_timing = _infer_timing_from_timestamp(earnings_date)
-        if inferred_timing is None:
-            _raise_unresolvable_timing(
-                ticker=ticker_value,
-                earnings_date=earnings_date,
-                raw_timing=raw_timing,
-                reason=(
-                    "missing or ambiguous timing; provide announcement_timing or a clearly "
-                    "pre-market/post-close timestamp"
-                ),
-            )
-
-        resolved_timing.append(inferred_timing)
+        _raise_unresolvable_timing(
+            ticker=ticker_value,
+            earnings_date=earnings_date,
+            raw_timing=raw_timing,
+            reason=(
+                "missing or ambiguous timing; provide announcement_timing or a clearly "
+                "pre-market/post-close timestamp"
+            ),
+        )
 
     prepared["announcement_timing"] = resolved_timing
     return (
@@ -394,7 +336,7 @@ def _compute_event_rows(
         iv_lookup = event_time_iv_inputs.set_index("earnings_date")["event_time_iv_annual"].to_dict()
 
     normalized_earnings_events = earnings_events.copy()
-    normalized_earnings_events["earnings_date"] = _strip_timezone_preserving_wall_clock(
+    normalized_earnings_events["earnings_date"] = strip_series_timezone_preserving_wall_clock(
         normalized_earnings_events["earnings_date"]
     )
     normalized_earnings_events = normalized_earnings_events.sort_values("earnings_date").reset_index(drop=True)
