@@ -68,13 +68,15 @@ def align_event_to_sessions(event_date: Any, announcement_timing: Any, price_ind
         same_day_pos = trading_days.searchsorted(event_day, side="left")
         has_same_day = same_day_pos < len(trading_days) and trading_days[same_day_pos] == event_day
 
+        pre_day_pos = same_day_pos if has_same_day else same_day_pos - 1
         next_day_pos = trading_days.searchsorted(event_day, side="right")
+        has_pre_day = pre_day_pos >= 0
         has_next_day = next_day_pos < len(trading_days)
 
-        if has_same_day and has_next_day:
+        if has_pre_day and has_next_day:
             result.update(
                 {
-                    "pre_event_date": trading_days[same_day_pos],
+                    "pre_event_date": trading_days[pre_day_pos],
                     "post_event_date": trading_days[next_day_pos],
                     "alignment_type": "after_close_to_next_open_close",
                     "alignment_flag": "ok",
@@ -86,17 +88,16 @@ def align_event_to_sessions(event_date: Any, announcement_timing: Any, price_ind
         return result
 
     if timing in _BEFORE_OPEN_ALIASES:
-        same_day_pos = trading_days.searchsorted(event_day, side="left")
-        has_same_day = same_day_pos < len(trading_days) and trading_days[same_day_pos] == event_day
-
-        prev_day_pos = same_day_pos - 1 if has_same_day else -1
+        post_day_pos = trading_days.searchsorted(event_day, side="left")
+        prev_day_pos = post_day_pos - 1
         has_prev_day = prev_day_pos >= 0
+        has_post_day = post_day_pos < len(trading_days)
 
-        if has_prev_day and has_same_day:
+        if has_prev_day and has_post_day:
             result.update(
                 {
                     "pre_event_date": trading_days[prev_day_pos],
-                    "post_event_date": trading_days[same_day_pos],
+                    "post_event_date": trading_days[post_day_pos],
                     "alignment_type": "before_open_to_same_open_close",
                     "alignment_flag": "ok",
                 }

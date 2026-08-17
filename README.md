@@ -62,6 +62,16 @@ What the fixture does **not** prove:
 - Actual historical option-return analysis requires event-time option premium snapshots.
 - Any old historical outputs generated before this containment change that treated a current option chain as event-time IV should be considered stale and invalid for research conclusions.
 
+## Daily-Bar Session Alignment Contract
+
+`run_analysis.py` now aligns earnings events to daily bars using available trading sessions, not calendar-day arithmetic.
+
+- `BMO` (before market open): pre-event session is the prior available trading session, and post-event session is the first available trading session on or after the event date.
+- `AMC` (after market close): pre-event session is the last available trading session on or before the event date, and post-event session is the next available trading session after the event date.
+- Weekends, holidays, and sparse fixtures are handled from the sorted price-history dates that actually exist in the input history.
+- Missing or ambiguous timing is not silently guessed. `run_analysis.py` accepts explicit `announcement_timing`/`timing` labels or clearly pre-market/post-close timestamps; otherwise it fails fast.
+- Daily-bar outputs remain limited to session-level price moves. They do not reconstruct intraday paths or intraday option behavior.
+
 ## Zero-Row Failure Semantics
 
 By default, both pipeline entry points now fail non-zero when:

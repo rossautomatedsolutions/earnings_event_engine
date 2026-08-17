@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
+from datetime import time
 
 import numpy as np
 import pandas as pd
 
 from data.earnings_calendar import get_earnings_dates
+from src.events import align_event_to_sessions
 
 
 @dataclass
@@ -49,6 +51,31 @@ EVENT_ROW_COLUMNS = [
     "event_time_iv_minus_realized_pct",
     "event_time_expected_move_proxy_return_pct",
 ]
+
+_TIMING_COLUMN_CANDIDATES = (
+    "announcement_timing",
+    "timing",
+    "earnings_timing",
+    "earnings_time",
+    "time_of_day",
+    "session",
+)
+_TIMING_ALIASES = {
+    "amc": "AMC",
+    "after_close": "AMC",
+    "after_market_close": "AMC",
+    "after_market": "AMC",
+    "post_close": "AMC",
+    "post_market": "AMC",
+    "bmo": "BMO",
+    "before_open": "BMO",
+    "before_market_open": "BMO",
+    "before_market": "BMO",
+    "pre_market": "BMO",
+    "pre_open": "BMO",
+}
+_PREMARKET_CUTOFF = time(hour=9, minute=30)
+_POSTCLOSE_CUTOFF = time(hour=16, minute=0)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -132,6 +159,119 @@ def _empty_event_time_iv_inputs() -> pd.DataFrame:
     return pd.DataFrame(columns=["ticker", "earnings_date", "event_time_iv_annual"])
 
 
+def _first_present(columns: pd.Index, candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _strip_timezone_preserving_wall_clock(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, errors="coerce")
+    if hasattr(parsed.dt, "tz") and parsed.dt.tz is not None:
+        return parsed.dt.tz_localize(None)
+    return parsed
+
+
+def _normalize_timing_value(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+
+    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return None
+    return _TIMING_ALIASES.get(normalized)
+
+
+def _infer_timing_from_timestamp(earnings_date: pd.Timestamp) -> str | None:
+    event_ts = pd.Timestamp(earnings_date)
+    if pd.isna(event_ts):
+        return None
+
+    if event_ts == event_ts.normalize():
+        return None
+
+    event_time = event_ts.time()
+    if event_time < _PREMARKET_CUTOFF:
+        return "BMO"
+    if event_time >= _POSTCLOSE_CUTOFF:
+        return "AMC"
+    return None
+
+
+def _raise_unresolvable_timing(
+    *,
+    ticker: str,
+    earnings_date: pd.Timestamp,
+    raw_timing: object,
+    reason: str,
+) -> None:
+    raw_label = "<missing>" if raw_timing is None or pd.isna(raw_timing) else repr(raw_timing)
+    raise ValueError(
+        "Unable to resolve announcement timing for "
+        f"ticker={ticker} earnings_date={pd.Timestamp(earnings_date).isoformat(sep=' ')}: "
+        f"{raw_label} ({reason})"
+    )
+
+
+def _prepare_earnings_events(ticker: str, earnings_df: pd.DataFrame) -> pd.DataFrame:
+    if earnings_df is None or earnings_df.empty:
+        return pd.DataFrame(columns=["ticker", "earnings_date", "announcement_timing"])
+
+    if "earnings_date" not in earnings_df.columns:
+        raise ValueError("earnings_df must contain an 'earnings_date' column")
+
+    prepared = earnings_df.copy()
+    prepared["ticker"] = prepared.get("ticker", ticker)
+    prepared["ticker"] = prepared["ticker"].astype("string").fillna(ticker).str.upper().str.strip()
+    prepared["earnings_date"] = _strip_timezone_preserving_wall_clock(prepared["earnings_date"])
+    prepared = prepared.dropna(subset=["earnings_date"]).copy()
+
+    if prepared.empty:
+        return pd.DataFrame(columns=["ticker", "earnings_date", "announcement_timing"])
+
+    timing_col = _first_present(prepared.columns, _TIMING_COLUMN_CANDIDATES)
+    resolved_timing: list[str] = []
+    for row in prepared.itertuples(index=False):
+        raw_timing = getattr(row, timing_col) if timing_col is not None else None
+        ticker_value = str(getattr(row, "ticker", ticker)).strip().upper() or str(ticker).strip().upper()
+        earnings_date = pd.Timestamp(getattr(row, "earnings_date"))
+
+        normalized_timing = _normalize_timing_value(raw_timing)
+        if normalized_timing is not None:
+            resolved_timing.append(normalized_timing)
+            continue
+
+        if raw_timing is not None and not pd.isna(raw_timing) and str(raw_timing).strip():
+            _raise_unresolvable_timing(
+                ticker=ticker_value,
+                earnings_date=earnings_date,
+                raw_timing=raw_timing,
+                reason="unsupported timing label; expected AMC/BMO-style session tags",
+            )
+
+        inferred_timing = _infer_timing_from_timestamp(earnings_date)
+        if inferred_timing is None:
+            _raise_unresolvable_timing(
+                ticker=ticker_value,
+                earnings_date=earnings_date,
+                raw_timing=raw_timing,
+                reason=(
+                    "missing or ambiguous timing; provide announcement_timing or a clearly "
+                    "pre-market/post-close timestamp"
+                ),
+            )
+
+        resolved_timing.append(inferred_timing)
+
+    prepared["announcement_timing"] = resolved_timing
+    return (
+        prepared.loc[:, ["ticker", "earnings_date", "announcement_timing"]]
+        .sort_values(["ticker", "earnings_date"])
+        .reset_index(drop=True)
+    )
+
+
 def _raise_invalid_event_time_iv_value(
     row: pd.Series,
     raw_value: object,
@@ -183,7 +323,7 @@ def _prepare_event_time_iv_inputs(
 
     prepared["earnings_date"] = pd.to_datetime(prepared["earnings_date"], errors="coerce")
     if hasattr(prepared["earnings_date"].dt, "tz") and prepared["earnings_date"].dt.tz is not None:
-        prepared["earnings_date"] = prepared["earnings_date"].dt.tz_convert(None)
+        prepared["earnings_date"] = prepared["earnings_date"].dt.tz_localize(None)
     prepared["earnings_date"] = prepared["earnings_date"].dt.normalize()
     prepared = prepared.dropna(subset=["earnings_date"]).copy()
 
@@ -238,13 +378,13 @@ def _prepare_event_time_iv_inputs(
 
 def _compute_event_rows(
     ticker: str,
-    earnings_dates: pd.Series,
+    earnings_events: pd.DataFrame,
     history: pd.DataFrame,
     lookback_window: int,
     event_time_iv_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     rows: list[dict] = []
-    if history.empty:
+    if history.empty or earnings_events.empty:
         return pd.DataFrame(columns=EVENT_ROW_COLUMNS)
 
     daily_ret = history["close"].pct_change()
@@ -253,18 +393,24 @@ def _compute_event_rows(
     if not event_time_iv_inputs.empty:
         iv_lookup = event_time_iv_inputs.set_index("earnings_date")["event_time_iv_annual"].to_dict()
 
-    normalized_earnings_dates = earnings_dates.sort_values()
-    if hasattr(normalized_earnings_dates.dt, "tz") and normalized_earnings_dates.dt.tz is not None:
-        normalized_earnings_dates = normalized_earnings_dates.dt.tz_localize(None)
+    normalized_earnings_events = earnings_events.copy()
+    normalized_earnings_events["earnings_date"] = _strip_timezone_preserving_wall_clock(
+        normalized_earnings_events["earnings_date"]
+    )
+    normalized_earnings_events = normalized_earnings_events.sort_values("earnings_date").reset_index(drop=True)
 
-    for earnings_date in normalized_earnings_dates:
-        prior = history.index[history.index < earnings_date]
-        after = history.index[history.index > earnings_date]
-        if len(prior) == 0 or len(after) == 0:
+    for event in normalized_earnings_events.itertuples(index=False):
+        earnings_date = pd.Timestamp(event.earnings_date)
+        alignment = align_event_to_sessions(
+            event_date=earnings_date,
+            announcement_timing=event.announcement_timing,
+            price_index=history.index,
+        )
+        if alignment["alignment_flag"] != "ok":
             continue
 
-        pre_day = prior[-1]
-        post_day = after[0]
+        pre_day = pd.Timestamp(alignment["pre_event_date"])
+        post_day = pd.Timestamp(alignment["post_event_date"])
 
         pre_price = float(history.loc[pre_day, "close"])
         post_price = float(history.loc[post_day, "close"])
@@ -380,26 +526,26 @@ def run_analysis(
         )
         return pd.DataFrame(columns=EVENT_ROW_COLUMNS), empty_summary
 
-    earnings_series = pd.to_datetime(earnings_df["earnings_date"], errors="coerce").dropna().sort_values()
-    if earnings_series.empty:
+    earnings_events = _prepare_earnings_events(normalized_ticker, earnings_df)
+    if earnings_events.empty:
         return pd.DataFrame(columns=EVENT_ROW_COLUMNS), _summarize(
             normalized_ticker,
             0,
             pd.DataFrame(columns=EVENT_ROW_COLUMNS),
         )
 
-    hist_start = earnings_series.min() - pd.Timedelta(days=max(45, window_days * 3))
-    hist_end = earnings_series.max() + pd.Timedelta(days=5)
+    hist_start = earnings_events["earnings_date"].min() - pd.Timedelta(days=max(45, window_days * 3))
+    hist_end = earnings_events["earnings_date"].max() + pd.Timedelta(days=5)
 
     history = _load_history(normalized_ticker, hist_start, hist_end)
     rows = _compute_event_rows(
         normalized_ticker,
-        earnings_series,
+        earnings_events,
         history,
         window_days,
         event_time_iv_df=event_time_iv_df,
     )
-    summary = _summarize(normalized_ticker, int(len(earnings_series)), rows)
+    summary = _summarize(normalized_ticker, int(len(earnings_events)), rows)
     return rows, summary
 
 

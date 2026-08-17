@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-from src.utils.datetime_utils import to_naive
 
 
 class EarningsCalendarRetrievalError(RuntimeError):
@@ -16,6 +15,18 @@ class EarningsCalendarRetrievalError(RuntimeError):
 
 def _empty_earnings_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=["ticker", "earnings_date"])
+
+
+def _to_session_clock_timestamp(value: object) -> pd.Timestamp:
+    """Drop timezone metadata while preserving the provider's wall-clock time.
+
+    Earnings timestamps are used for session classification (BMO vs AMC), so we
+    preserve the original clock reading instead of converting to UTC first.
+    """
+    parsed = pd.Timestamp(pd.to_datetime(value))
+    if parsed.tzinfo is not None:
+        return parsed.tz_localize(None)
+    return parsed
 
 
 def get_earnings_dates(ticker: str) -> pd.DataFrame:
@@ -52,5 +63,5 @@ def get_earnings_dates(ticker: str) -> pd.DataFrame:
     parsed = pd.to_datetime(result["earnings_date"], errors="coerce")
     valid_mask = parsed.notna()
     result = result.loc[valid_mask].copy()
-    result["earnings_date"] = parsed.loc[valid_mask].map(to_naive)
+    result["earnings_date"] = parsed.loc[valid_mask].map(_to_session_clock_timestamp)
     return result.reset_index(drop=True)
