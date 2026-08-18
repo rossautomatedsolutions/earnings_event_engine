@@ -21,8 +21,8 @@ python scripts\run_full_research_pipeline.py --fixture-dir tests\fixtures\offlin
 Required stages in the canonical run:
 
 - `event_pipeline`: runs `scripts/run_event_pipeline_test.py` in fixture or live mode, validates `events.parquet`, `clean_events.parquet`, `features.parquet`, and `diagnostics.parquet`, and derives `validated_features.parquet` for downstream research
-- `earnings_analysis`: runs `analysis.earnings_analysis.run_full_analysis()` on the validated-only research subset
-- `strategy_simulation`: runs `strategies.straddle_simulator.run_straddle_analysis()` on the validated-only research subset
+- `earnings_analysis`: runs `analysis.earnings_analysis.run_full_analysis()` on the validated-only research subset, keeping price-only summaries separate from option-implied pricing conclusions
+- `strategy_simulation`: runs `strategies.straddle_simulator.run_straddle_analysis()` on the validated-only research subset using event-time option-derived `implied_move` values only
 - `conditional_analysis`: runs `analysis.conditional_analysis.run_conditional_analysis()` on the strategy results
 
 Optional stage:
@@ -37,12 +37,13 @@ Exit semantics:
 Mode behavior:
 
 - `--fixture-dir ...`: deterministic offline mode using only local fixtures; it never falls back to live data
-- no `--fixture-dir`: live mode; this requires `--tickers`
+- no `--fixture-dir`: live mode; this requires `--tickers`, and the current pipeline does not silently substitute HV20 for missing event-time option snapshots
 
 What deterministic full-run success proves:
 
 - orchestration wiring is honest end to end
 - the validated pipeline artifact contract is produced and the validated-only research subset is what downstream stages actually consume
+- event-time option-derived `implied_move` semantics are preserved when fixture option snapshots are supplied
 - the required research stages can complete without network access when fixtures are supplied
 
 What deterministic full-run success does **not** prove:
@@ -82,6 +83,9 @@ Core artifact contract shared by both entry points:
 - `events.parquet`: normalized raw events after retrieval or fixture loading
 - `clean_events.parquet`: validated clean events
 - `features.parquet`: enriched feature-level rows retained for diagnostics and auditability, including invalid rows when present
+- `implied_move`: event-time option-derived implied move from explicit call/put snapshot data, computed as `(call_mid + put_mid) / underlying_price`
+- `hv20_expected_move_proxy`: separate historical-volatility expected-move proxy retained for context only
+- `surprise_vs_implied`: only populated when real event-time `implied_move` is available
 - `validated_features.parquet`: orchestrator-only artifact used by required downstream research stages
 
 Additional live small-batch artifacts from `scripts/run_small_batch_test.py`:
@@ -95,11 +99,13 @@ What the fixture proves:
 - pipeline wiring works end to end without network access
 - the event, clean-event, and feature artifact contracts are non-empty and stable
 - the full orchestrator can restrict downstream research to validated feature rows only
+- fixture option snapshots map to event-time `implied_move` values without HV proxy substitution
 
 What the fixture does **not** prove:
 
 - live data availability or market-data quality
 - correctness of historical option snapshots
+- successful option-based strategy output is still a simplified research proxy unless actual historical option entry/exit premiums are modeled
 - trading profitability or research efficacy
 
 ## Historical IV Caveat

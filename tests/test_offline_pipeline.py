@@ -35,8 +35,11 @@ PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_event_pipeline_test.py"
 ANALYSIS_REQUIRED_COLUMNS = {
     "ticker",
     "announcement_timing",
+    "hv20_expected_move_proxy",
     "realized_gap_move",
     "implied_move",
+    "implied_move_available",
+    "implied_move_source",
     "surprise_vs_implied",
 }
 
@@ -99,6 +102,55 @@ class OfflinePipelineTest(unittest.TestCase):
         self.assertNotIn("pre_close", raw_events.columns)
         self.assertIn("pre_close", clean_events.columns)
         self.assertTrue(ANALYSIS_REQUIRED_COLUMNS.issubset(set(features.columns)))
+
+    def test_fixture_pipeline_uses_event_time_option_implied_moves(self) -> None:
+        result, output_dir = self._run_pipeline()
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+
+        features = pd.read_parquet(output_dir / "features.parquet").set_index("ticker")
+        aapl = features.loc["AAPL"]
+        msft = features.loc["MSFT"]
+
+        self.assertAlmostEqual(float(aapl["implied_move"]), (4.8 + 4.7) / 104.5, places=6)
+        self.assertAlmostEqual(float(msft["implied_move"]), (5.2 + 5.1) / 210.0, places=6)
+        self.assertTrue(bool(aapl["implied_move_available"]))
+        self.assertTrue(bool(msft["implied_move_available"]))
+        self.assertEqual(str(aapl["implied_move_source"]), "event_option_straddle_mid_over_spot")
+        self.assertEqual(str(msft["implied_move_source"]), "event_option_straddle_mid_over_spot")
+        self.assertTrue(pd.notna(aapl["hv20_expected_move_proxy"]))
+        self.assertTrue(pd.notna(msft["hv20_expected_move_proxy"]))
+        self.assertGreater(abs(float(aapl["implied_move"]) - float(aapl["hv20_expected_move_proxy"])), 0.01)
+        self.assertGreater(abs(float(msft["implied_move"]) - float(msft["hv20_expected_move_proxy"])), 0.01)
+
+    def test_missing_option_data_leaves_implied_move_unavailable_without_hv_fallback(self) -> None:
+        fixture_dir = self._make_fixture_dir(
+            events_csv=(FIXTURE_DIR / "earnings_events.csv").read_text(encoding="utf-8"),
+            options_csv=None,
+        )
+        output_dir = fixture_dir.parent / "outputs"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PIPELINE_SCRIPT),
+                "--fixture-dir",
+                str(fixture_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+
+        features = pd.read_parquet(output_dir / "features.parquet")
+        self.assertTrue(features["implied_move"].isna().all())
+        self.assertFalse(features["implied_move_available"].fillna(False).any())
+        self.assertTrue(features["surprise_vs_implied"].isna().all())
+        self.assertTrue(features["hv20_expected_move_proxy"].notna().any())
 
     def test_run_full_analysis_succeeds_on_fixture_generated_feature_artifact(self) -> None:
         result, output_dir = self._run_pipeline()

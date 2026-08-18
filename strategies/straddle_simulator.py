@@ -1,4 +1,4 @@
-"""Utilities to evaluate long-straddle profitability from feature datasets."""
+"""Utilities to evaluate simplified long-straddle research proxies."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.features.option_selection import EVENT_OPTION_IMPLIED_MOVE_SOURCE
+
 REQUIRED_COLUMNS = ("implied_move", "realized_gap_move")
+IMPLIED_AVAILABLE_COLUMN = "implied_move_available"
+IMPLIED_SOURCE_COLUMN = "implied_move_source"
 
 
 def _validate_input(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,20 +23,28 @@ def _validate_input(df: pd.DataFrame) -> pd.DataFrame:
     for column in REQUIRED_COLUMNS:
         results[column] = pd.to_numeric(results[column], errors="coerce")
 
+    eligible = results["implied_move"].notna()
+    if IMPLIED_AVAILABLE_COLUMN in results.columns:
+        eligible &= results[IMPLIED_AVAILABLE_COLUMN].astype("boolean").fillna(False).astype(bool)
+    if IMPLIED_SOURCE_COLUMN in results.columns:
+        source = results[IMPLIED_SOURCE_COLUMN].astype("string").fillna("")
+        eligible &= source.eq(EVENT_OPTION_IMPLIED_MOVE_SOURCE)
+    results["_option_strategy_eligible"] = eligible.astype(bool)
     return results
 
 
-def simulate_straddle(df: pd.DataFrame, cost_multiplier: float = 1.5) -> pd.DataFrame:
-    """Simulate long straddle outcomes for each event row.
+def simulate_straddle(df: pd.DataFrame, cost_multiplier: float = 1.0) -> pd.DataFrame:
+    """Simulate a long-straddle proxy using event-time option-derived implied move.
 
-    Assumption: ``implied_move`` approximates straddle cost (in percent terms).
+    The resulting PnL is still a simplified research proxy: it compares realized
+    gap move with a normalized event-time straddle cost proxy and does not model
+    actual historical option entry/exit executions.
     """
-    results = _validate_input(df)
-
+    validated = _validate_input(df)
+    results = validated.loc[validated["_option_strategy_eligible"]].copy()
     results["cost"] = results["implied_move"] * cost_multiplier
     results["payoff"] = results["realized_gap_move"].abs()
     results["pnl"] = results["payoff"] - results["cost"]
-
     return results
 
 
@@ -98,23 +110,26 @@ def _load_features(path: str | Path) -> pd.DataFrame:
 
 def run_straddle_analysis(
     path: str | Path,
-    cost_multiplier: float = 1.5,
+    cost_multiplier: float = 1.0,
 ) -> tuple[pd.DataFrame, dict[str, float], pd.DataFrame]:
-    """Load features, run simulation, and print summary and ticker breakdown."""
+    """Load features, run the option-backed strategy proxy, and print summary output."""
     features = _load_features(path)
+    loaded_rows = len(features)
     results = simulate_straddle(features, cost_multiplier=cost_multiplier)
     summary = compute_summary(results)
 
     print("Long Straddle Summary")
+    print(f"- loaded_rows: {loaded_rows}")
+    print(f"- option_eligible_rows: {len(results)}")
     for key, value in summary.items():
         print(f"- {key}: {value:.6f}" if pd.notna(value) else f"- {key}: nan")
 
-    if "ticker" in results.columns:
+    if "ticker" in results.columns and not results.empty:
         ticker_breakdown = breakdown_by_ticker(results)
         print("\nBreakdown by ticker")
         print(ticker_breakdown.round(6).to_string())
     else:
         ticker_breakdown = pd.DataFrame()
-        print("\nBreakdown by ticker skipped (missing 'ticker' column).")
+        print("\nBreakdown by ticker skipped (no option-eligible rows).")
 
     return results, summary, ticker_breakdown

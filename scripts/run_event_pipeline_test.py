@@ -31,6 +31,7 @@ from src.events.timing import (
     strip_series_timezone_preserving_wall_clock,
     strip_timezone_preserving_wall_clock,
 )
+from src.features.option_selection import EVENT_OPTION_IMPLIED_MOVE_SOURCE
 from utils.datetime_utils import (
     assert_same_timezone,
     normalize_datetime_index,
@@ -53,6 +54,14 @@ ENRICHED_EVENT_COLUMNS = [
     "pre_close",
     "post_open",
     "post_close",
+    "hv20_expected_move_proxy",
+    "option_snapshot_available",
+    "implied_move_available",
+    "implied_move_source",
+    "option_call_mid",
+    "option_put_mid",
+    "option_straddle_mid",
+    "implied_move_dollars",
     "implied_move",
     "price_alignment_valid",
 ]
@@ -65,9 +74,17 @@ FEATURE_COLUMNS = [
     "announcement_timing",
     "mapped_session",
     "price_alignment_valid",
+    "option_snapshot_available",
+    "implied_move_available",
+    "implied_move_source",
     "pre_close",
     "post_open",
     "post_close",
+    "hv20_expected_move_proxy",
+    "option_call_mid",
+    "option_put_mid",
+    "option_straddle_mid",
+    "implied_move_dollars",
     "implied_move",
     "realized_gap_move",
     "realized_close_move",
@@ -452,6 +469,14 @@ def load_prices_and_compute_moves(
         group["pre_close"] = pd.NA
         group["post_open"] = pd.NA
         group["post_close"] = pd.NA
+        group["hv20_expected_move_proxy"] = pd.NA
+        group["option_snapshot_available"] = False
+        group["implied_move_available"] = False
+        group["implied_move_source"] = pd.NA
+        group["option_call_mid"] = pd.NA
+        group["option_put_mid"] = pd.NA
+        group["option_straddle_mid"] = pd.NA
+        group["implied_move_dollars"] = pd.NA
         group["implied_move"] = pd.NA
         group["price_alignment_valid"] = False
 
@@ -493,7 +518,7 @@ def load_prices_and_compute_moves(
             if isinstance(hv, pd.Series):
                 hv = hv.iloc[-1] if not hv.empty else None
             if hv is not None and pd.notna(hv):
-                group.at[row_idx, "implied_move"] = float(hv)
+                group.at[row_idx, "hv20_expected_move_proxy"] = float(hv)
 
             group.at[row_idx, "post_open"] = history.loc[post_date, "open"]
             group.at[row_idx, "post_close"] = history.loc[post_date, "close"]
@@ -549,6 +574,151 @@ def load_prices_and_compute_moves(
     return out.loc[:, ordered_cols]
 
 
+def _normalize_option_type(value: object) -> str:
+    text = str(value).strip().lower()
+    if text in {"c", "call", "calls"}:
+        return "call"
+    if text in {"p", "put", "puts"}:
+        return "put"
+    return text
+
+
+def _coerce_option_mid(
+    bid: pd.Series,
+    ask: pd.Series,
+    fallback_mid: pd.Series,
+) -> pd.Series:
+    valid_bid_ask = bid.notna() & ask.notna() & (bid >= 0) & (ask >= bid)
+    return ((bid + ask) / 2.0).where(valid_bid_ask, fallback_mid)
+
+
+def attach_event_time_option_implied_moves(
+    events_with_prices: pd.DataFrame,
+    options_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Attach event-time option snapshot metrics keyed by the pipeline event_id."""
+    if events_with_prices.empty:
+        return _empty_enriched_events_frame()
+
+    enriched = events_with_prices.copy()
+    defaults: dict[str, object] = {
+        "option_snapshot_available": False,
+        "implied_move_available": False,
+        "implied_move_source": pd.NA,
+        "option_call_mid": pd.NA,
+        "option_put_mid": pd.NA,
+        "option_straddle_mid": pd.NA,
+        "implied_move_dollars": pd.NA,
+        "implied_move": pd.NA,
+    }
+    for column, default_value in defaults.items():
+        if column not in enriched.columns:
+            enriched[column] = default_value
+
+    if options_df is None or options_df.empty:
+        return enriched
+
+    required = {"event_id", "option_type", "strike", "underlying_price", "bid", "ask", "mid"}
+    missing = sorted(required.difference(options_df.columns))
+    if missing:
+        raise ValueError(f"Option snapshot rows are missing required columns: {missing}")
+
+    options = options_df.copy()
+    options["event_id"] = options["event_id"]
+    options["option_type_normalized"] = options["option_type"].map(_normalize_option_type)
+    options["strike"] = pd.to_numeric(options["strike"], errors="coerce")
+    options["underlying_price"] = pd.to_numeric(options["underlying_price"], errors="coerce")
+    options["bid"] = pd.to_numeric(options["bid"], errors="coerce")
+    options["ask"] = pd.to_numeric(options["ask"], errors="coerce")
+    options["mid"] = pd.to_numeric(options["mid"], errors="coerce")
+    options["option_mid"] = _coerce_option_mid(options["bid"], options["ask"], options["mid"])
+    options["strike_distance_pct"] = (
+        (options["strike"] - options["underlying_price"]).abs() / options["underlying_price"].replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan)
+
+    def _default_option_metrics(event_id: object) -> dict[str, object]:
+        return {"event_id": event_id, **defaults}
+
+    metrics: list[dict[str, object]] = []
+    for event_id, group in options.groupby("event_id", dropna=False):
+        working = group.dropna(subset=["strike", "underlying_price"]).copy()
+        if working.empty:
+            metrics.append(_default_option_metrics(event_id))
+            continue
+
+        atm_strike = (
+            working.sort_values(["strike_distance_pct", "strike"], na_position="last")
+            .iloc[0]["strike"]
+        )
+        strike_group = working.loc[working["strike"] == atm_strike].copy()
+        call_rows = strike_group.loc[strike_group["option_type_normalized"] == "call"].copy()
+        put_rows = strike_group.loc[strike_group["option_type_normalized"] == "put"].copy()
+        if call_rows.empty or put_rows.empty:
+            metrics.append(_default_option_metrics(event_id))
+            continue
+
+        call_row = call_rows.iloc[0]
+        put_row = put_rows.iloc[0]
+        call_mid = pd.to_numeric(pd.Series([call_row["option_mid"]]), errors="coerce").iloc[0]
+        put_mid = pd.to_numeric(pd.Series([put_row["option_mid"]]), errors="coerce").iloc[0]
+        spot_candidates = pd.to_numeric(
+            pd.Series([call_row["underlying_price"], put_row["underlying_price"]]),
+            errors="coerce",
+        )
+        spot_candidates = spot_candidates.loc[spot_candidates > 0]
+        spot = spot_candidates.iloc[0] if not spot_candidates.empty else np.nan
+
+        straddle_mid = np.nan
+        implied_move = np.nan
+        if pd.notna(call_mid) and call_mid > 0 and pd.notna(put_mid) and put_mid > 0:
+            straddle_mid = float(call_mid + put_mid)
+            if pd.notna(spot) and spot > 0:
+                implied_move = float(straddle_mid / float(spot))
+
+        implied_move_available = pd.notna(implied_move) and float(implied_move) > 0
+        metrics.append(
+            {
+                **_default_option_metrics(event_id),
+                "option_snapshot_available": bool(implied_move_available),
+                "implied_move_available": bool(implied_move_available),
+                "implied_move_source": EVENT_OPTION_IMPLIED_MOVE_SOURCE if implied_move_available else pd.NA,
+                "option_call_mid": call_mid,
+                "option_put_mid": put_mid,
+                "option_straddle_mid": straddle_mid,
+                "implied_move_dollars": straddle_mid,
+                "implied_move": implied_move,
+            }
+        )
+
+    option_metrics = pd.DataFrame(metrics)
+    if option_metrics.empty:
+        return enriched
+
+    enriched = enriched.drop(
+        columns=[
+            "option_snapshot_available",
+            "implied_move_available",
+            "implied_move_source",
+            "option_call_mid",
+            "option_put_mid",
+            "option_straddle_mid",
+            "implied_move_dollars",
+            "implied_move",
+        ],
+        errors="ignore",
+    ).merge(option_metrics, on="event_id", how="left")
+
+    for column, default_value in defaults.items():
+        if column not in enriched.columns:
+            enriched[column] = default_value
+    for column in ("option_snapshot_available", "implied_move_available"):
+        enriched[column] = enriched[column].fillna(False).astype(bool)
+    for column in ("option_call_mid", "option_put_mid", "option_straddle_mid", "implied_move_dollars", "implied_move"):
+        enriched[column] = pd.to_numeric(enriched[column], errors="coerce")
+
+    return enriched
+
+
 def generate_features(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
         return _empty_features_frame()
@@ -558,11 +728,16 @@ def generate_features(events: pd.DataFrame) -> pd.DataFrame:
     post_open = pd.to_numeric(features["post_open"], errors="coerce")
     post_close = pd.to_numeric(features["post_close"], errors="coerce")
     implied_move = pd.to_numeric(features["implied_move"], errors="coerce")
+    if "implied_move_available" in features.columns:
+        implied_move_available = features["implied_move_available"].astype("boolean").fillna(False).astype(bool)
+    else:
+        implied_move_available = implied_move.notna()
 
     features["realized_gap_move"] = (post_open / pre_close - 1.0).abs()
     features["realized_close_move"] = (post_close / pre_close - 1.0).abs()
-    features["iv_minus_realized_gap"] = implied_move - features["realized_gap_move"]
-    features["surprise_vs_implied"] = features["realized_gap_move"] - implied_move
+    eligible_implied_move = implied_move.where(implied_move_available, np.nan)
+    features["iv_minus_realized_gap"] = eligible_implied_move - features["realized_gap_move"]
+    features["surprise_vs_implied"] = features["realized_gap_move"] - eligible_implied_move
 
     features = features.sort_values(["ticker", "event_date"]).copy()
     features["days_since_prev_event"] = (
@@ -727,14 +902,16 @@ def main() -> None:
                 args.max_events,
                 events_source_df=fixture_events,
             )
-            events_with_prices = load_prices_and_compute_moves(events, price_panel_df=fixture_prices)
-            feature_df = generate_features(events_with_prices)
             options_df = load_fixture_options_for_events(events, fixture_options_source)
+            events_with_prices = load_prices_and_compute_moves(events, price_panel_df=fixture_prices)
+            events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
+            feature_df = generate_features(events_with_prices)
         else:
             events = retrieve_and_normalize_events(tickers, start_date, end_date, args.max_events)
             events_with_prices = load_prices_and_compute_moves(events)
-            feature_df = generate_features(events_with_prices)
             options_df = None
+            events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
+            feature_df = generate_features(events_with_prices)
 
         if not events_with_prices.empty:
             clean_events, diagnostics_summary, diagnostics_flags = run_event_diagnostics(
@@ -816,7 +993,10 @@ def main() -> None:
         "event_date",
         "pre_close",
         "post_open",
+        "hv20_expected_move_proxy",
         "implied_move",
+        "implied_move_available",
+        "implied_move_source",
         "realized_gap_move",
         "surprise_vs_implied",
         "valid_event",

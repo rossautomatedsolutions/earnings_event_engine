@@ -32,6 +32,7 @@ from scripts.run_event_pipeline_test import (
     _base_diagnostics_summary,
     _build_failure_counts,
     _build_coverage_input_df,
+    attach_event_time_option_implied_moves,
     _empty_events_frame,
     _empty_diagnostics_flags,
     _empty_enriched_events_frame,
@@ -254,6 +255,7 @@ def main() -> None:
         options_df = build_synthetic_options(events_with_prices, debug=args.debug)
         log_event("options", "Built synthetic options snapshots", {"option_rows": len(options_df)})
 
+        events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
         features_df = generate_features(events_with_prices)
         log_event("features", "Generated features", {"feature_rows": len(features_df)})
 

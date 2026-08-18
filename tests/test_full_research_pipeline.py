@@ -187,6 +187,10 @@ class FullResearchPipelineTest(unittest.TestCase):
         validated_features = pd.read_parquet(output_dir / full_pipeline.VALIDATED_FEATURES_FILENAME)
         self.assertFalse(features.empty)
         self.assertFalse(validated_features.empty)
+        validated_by_ticker = validated_features.set_index("ticker")
+        self.assertAlmostEqual(float(validated_by_ticker.loc["AAPL", "implied_move"]), (4.8 + 4.7) / 104.5, places=6)
+        self.assertAlmostEqual(float(validated_by_ticker.loc["MSFT", "implied_move"]), (5.2 + 5.1) / 210.0, places=6)
+        self.assertTrue(validated_features["implied_move_available"].fillna(False).all())
 
     def test_mixed_validity_fixture_routes_only_validated_rows_to_required_downstream_stages(self) -> None:
         fixture_dir = self._make_fixture_dir(
@@ -248,6 +252,13 @@ class FullResearchPipelineTest(unittest.TestCase):
         self.assertEqual(report.pipeline_artifacts.validated_feature_row_count, 1)
         self.assertCountEqual(raw_features["ticker"].astype(str).tolist(), ["AAPL", "MSFT"])
         self.assertEqual(validated_features["ticker"].astype(str).tolist(), ["AAPL"])
+        raw_by_ticker = raw_features.set_index("ticker")
+        self.assertAlmostEqual(float(raw_by_ticker.loc["AAPL", "implied_move"]), (4.8 + 4.7) / 104.5, places=6)
+        self.assertTrue(pd.isna(raw_by_ticker.loc["MSFT", "implied_move"]))
+        self.assertTrue(bool(raw_by_ticker.loc["AAPL", "implied_move_available"]))
+        self.assertFalse(bool(raw_by_ticker.loc["MSFT", "implied_move_available"]))
+        self.assertTrue(pd.notna(raw_by_ticker.loc["MSFT", "hv20_expected_move_proxy"]))
+        self.assertTrue(pd.isna(raw_by_ticker.loc["MSFT", "surprise_vs_implied"]))
         self.assertEqual(captured["analysis_tickers"], ["AAPL"])
         self.assertEqual(captured["strategy_tickers"], ["AAPL"])
         self.assertEqual(captured["conditional_tickers"], ["AAPL"])

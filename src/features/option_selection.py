@@ -14,6 +14,7 @@ _OPTION_TYPE_CANDIDATES = ("option_type", "type", "right")
 _BID_CANDIDATES = ("bid", "best_bid")
 _ASK_CANDIDATES = ("ask", "best_ask")
 _MID_CANDIDATES = ("mid", "mark", "last", "price", "close")
+EVENT_OPTION_IMPLIED_MOVE_SOURCE = "event_option_straddle_mid_over_spot"
 
 
 def _pick_column(df: pd.DataFrame, candidates: tuple[str, ...], required: bool = True) -> str | None:
