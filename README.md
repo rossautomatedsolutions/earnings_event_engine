@@ -12,6 +12,16 @@ Lightweight tooling for running and validating the earnings event pipeline, incl
 
 `scripts/run_full_research_pipeline.py` is the honest orchestration layer for the canonical multi-stage research run.
 
+Canonical offline demo notebook:
+
+- `notebooks/01_earnings_event_engine_demo.ipynb`: screen-recording-friendly walkthrough that runs the deterministic fixture through the real canonical pipeline, inspects the emitted artifacts, and shows how validated-only downstream research consumes `validated_features.parquet`
+
+To run the notebook interactively, open it in Jupyter from the repo root and execute top to bottom. To execute it headlessly:
+
+```powershell
+jupyter nbconvert --to notebook --execute notebooks\01_earnings_event_engine_demo.ipynb --inplace --ExecutePreprocessor.timeout=600
+```
+
 Deterministic offline command:
 
 ```powershell
