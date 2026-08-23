@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 import re
@@ -33,6 +34,50 @@ HISTORICAL_OPTION_EVENT_COLUMNS = [
     "option_snapshot_quote_date",
     "option_snapshot_source_path",
 ]
+OPTION_EVENT_FLAG_COLUMNS = [
+    "has_call_leg",
+    "has_put_leg",
+    "bid_ask_spread_invalid",
+    "atm_strike_too_far",
+    "missing_call_leg",
+    "missing_put_leg",
+    "zero_or_nan_mid",
+    "missing_options_data",
+    "missing_ticker_directory",
+    "missing_eod_history",
+    "missing_option_snapshot_directory",
+    "missing_required_snapshot_file",
+    "snapshot_unparseable",
+    "no_usable_expiration",
+    "no_valid_atm_pair",
+]
+OPTION_EVENT_METADATA_COLUMNS = [
+    "option_coverage_status",
+    "historical_option_selection_success",
+    "option_snapshot_quote_date",
+    "option_snapshot_source_path",
+    "option_selected_expiration",
+    "option_selected_strike",
+]
+OPTION_EVENT_DIAGNOSTIC_COLUMNS = [
+    "event_id",
+    *OPTION_EVENT_FLAG_COLUMNS,
+    *OPTION_EVENT_METADATA_COLUMNS,
+]
+
+
+@dataclass
+class TradingFoundationOptionLoadResult:
+    """Structured Trading_Foundation option-load output."""
+
+    options_df: pd.DataFrame
+    report: dict[str, int]
+    event_diagnostics_df: pd.DataFrame
+
+    def __iter__(self):
+        yield self.options_df
+        yield self.report
+        yield self.event_diagnostics_df
 
 
 def _validate_historical_data_root(historical_data_root: str | Path) -> Path:
@@ -102,6 +147,38 @@ def _parse_occ_option_symbol(symbol: object) -> dict[str, object] | None:
 
 def _empty_historical_options_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=HISTORICAL_OPTION_EVENT_COLUMNS)
+
+
+def _empty_option_event_diagnostics_frame(event_ids: Iterable[object] = ()) -> pd.DataFrame:
+    rows = []
+    for event_id in event_ids:
+        row: dict[str, object] = {
+            "event_id": event_id,
+            "has_call_leg": False,
+            "has_put_leg": False,
+            "bid_ask_spread_invalid": False,
+            "atm_strike_too_far": False,
+            "missing_call_leg": False,
+            "missing_put_leg": False,
+            "zero_or_nan_mid": False,
+            "missing_options_data": False,
+            "missing_ticker_directory": False,
+            "missing_eod_history": False,
+            "missing_option_snapshot_directory": False,
+            "missing_required_snapshot_file": False,
+            "snapshot_unparseable": False,
+            "no_usable_expiration": False,
+            "no_valid_atm_pair": False,
+            "option_coverage_status": "unknown",
+            "historical_option_selection_success": False,
+            "option_snapshot_quote_date": pd.NaT,
+            "option_snapshot_source_path": pd.NA,
+            "option_selected_expiration": pd.NaT,
+            "option_selected_strike": pd.NA,
+        }
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=OPTION_EVENT_DIAGNOSTIC_COLUMNS)
 
 
 def _resolve_eod_path(root: Path, ticker: str) -> Path | None:
@@ -196,6 +273,10 @@ def _snapshot_date_from_path(path: Path) -> pd.Timestamp | pd.NaT:
     if not match:
         return pd.NaT
     return pd.Timestamp(match.group(1)).normalize()
+
+
+def _resolve_option_snapshot_directory(root: Path, ticker: str) -> Path:
+    return root / ticker / "option_snapshot"
 
 
 def _prepare_option_snapshot_chain(snapshot_path: Path) -> pd.DataFrame:
@@ -297,24 +378,54 @@ def _extract_selected_leg_rows(chain: pd.DataFrame, snapshot: dict[str, object])
     return call_rows.iloc[0], put_rows.iloc[0]
 
 
+def _derive_selected_leg_flags(
+    chain: pd.DataFrame,
+    snapshot: dict[str, object],
+) -> tuple[bool, bool, pd.Timestamp | None, float | None]:
+    selected_expiry = pd.to_datetime(snapshot.get("selected_expiry"), errors="coerce")
+    selected_strike = pd.to_numeric(pd.Series([snapshot.get("atm_strike")]), errors="coerce").iloc[0]
+    if pd.isna(selected_expiry) or pd.isna(selected_strike):
+        return False, False, None, None
+
+    strike_group = chain.loc[
+        (pd.to_datetime(chain["expiration"], errors="coerce").dt.normalize() == selected_expiry.normalize())
+        & (pd.to_numeric(chain["strike"], errors="coerce") == float(selected_strike))
+    ].copy()
+    if strike_group.empty:
+        return False, False, selected_expiry.normalize(), float(selected_strike)
+
+    option_type = strike_group["option_type"].astype("string").str.lower()
+    has_call_leg = bool(option_type.eq("call").any())
+    has_put_leg = bool(option_type.eq("put").any())
+    return has_call_leg, has_put_leg, selected_expiry.normalize(), float(selected_strike)
+
+
 def load_trading_foundation_options_for_events(
     events_with_prices: pd.DataFrame,
     historical_data_root: str | Path,
-) -> tuple[pd.DataFrame, dict[str, int]]:
+) -> TradingFoundationOptionLoadResult:
     """Map canonical option_snapshot files into the repo's existing event-level option contract."""
     report = {
         "requested_events": int(len(events_with_prices)),
         "events_with_selected_options": 0,
         "emitted_option_rows": 0,
+        "missing_ticker_directory_events": 0,
         "missing_snapshot_file_events": 0,
         "missing_eod_history_events": 0,
         "invalid_underlying_price_events": 0,
         "alignment_failed_events": 0,
-        "empty_or_unparseable_snapshot_events": 0,
+        "missing_option_snapshot_directory_events": 0,
+        "snapshot_unparseable_events": 0,
+        "no_usable_expiration_events": 0,
+        "no_valid_atm_pair_events": 0,
         "selection_failed_events": 0,
     }
     if events_with_prices is None or events_with_prices.empty:
-        return _empty_historical_options_frame(), report
+        return TradingFoundationOptionLoadResult(
+            options_df=_empty_historical_options_frame(),
+            report=report,
+            event_diagnostics_df=_empty_option_event_diagnostics_frame(),
+        )
 
     required = {"event_id", "ticker", "event_date", "announcement_timing", "pre_close"}
     missing = sorted(required.difference(events_with_prices.columns))
@@ -326,22 +437,38 @@ def load_trading_foundation_options_for_events(
 
     root = _validate_historical_data_root(historical_data_root)
     emitted_rows: list[dict[str, object]] = []
+    event_rows = _empty_option_event_diagnostics_frame(events_with_prices["event_id"].tolist())
     history_cache: dict[str, pd.DataFrame] = {}
     snapshot_cache: dict[tuple[str, str], pd.DataFrame] = {}
 
     for _, row in events_with_prices.iterrows():
+        event_id = row["event_id"]
+        event_mask = event_rows["event_id"] == event_id
         ticker = str(row["ticker"]).strip().upper()
+        ticker_dir = root / ticker
+        if not ticker_dir.exists():
+            event_rows.loc[event_mask, "missing_ticker_directory"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "missing_ticker_directory"
+            report["missing_ticker_directory_events"] += 1
+            continue
+
         history = history_cache.get(ticker)
         if history is None:
             history = _load_local_eod_history(root, ticker)
             history_cache[ticker] = history
 
         if history.empty:
+            event_rows.loc[event_mask, "missing_eod_history"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "missing_eod_history"
             report["missing_eod_history_events"] += 1
             continue
 
         snapshot_date = _resolve_pre_event_snapshot_date(row, history)
         if snapshot_date is None:
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "alignment_failed"
             report["alignment_failed_events"] += 1
             continue
 
@@ -353,22 +480,44 @@ def load_trading_foundation_options_for_events(
                     errors="coerce",
                 ).iloc[0]
         if pd.isna(underlying_price) or float(underlying_price) <= 0:
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "invalid_underlying_price"
             report["invalid_underlying_price_events"] += 1
+            continue
+
+        snapshot_dir = _resolve_option_snapshot_directory(root, ticker)
+        if not snapshot_dir.exists():
+            event_rows.loc[event_mask, "missing_option_snapshot_directory"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "missing_option_snapshot_directory"
+            report["missing_option_snapshot_directory_events"] += 1
             continue
 
         snapshot_path = _resolve_option_snapshot_path(root, ticker, snapshot_date)
         if snapshot_path is None:
+            event_rows.loc[event_mask, "missing_required_snapshot_file"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "missing_required_snapshot_file"
             report["missing_snapshot_file_events"] += 1
             continue
 
         cache_key = (ticker, snapshot_path.name)
         chain = snapshot_cache.get(cache_key)
         if chain is None:
-            chain = _prepare_option_snapshot_chain(snapshot_path)
+            try:
+                chain = _prepare_option_snapshot_chain(snapshot_path)
+            except ValueError:
+                chain = pd.DataFrame()
             snapshot_cache[cache_key] = chain
 
+        event_rows.loc[event_mask, "option_snapshot_quote_date"] = _snapshot_date_from_path(snapshot_path)
+        event_rows.loc[event_mask, "option_snapshot_source_path"] = str(snapshot_path)
+
         if chain.empty:
-            report["empty_or_unparseable_snapshot_events"] += 1
+            event_rows.loc[event_mask, "snapshot_unparseable"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "snapshot_unparseable"
+            report["snapshot_unparseable_events"] += 1
             continue
 
         selection = select_event_options(
@@ -376,12 +525,40 @@ def load_trading_foundation_options_for_events(
             underlying_price=float(underlying_price),
             event_date=row["event_date"],
         )
+        has_call_leg, has_put_leg, selected_expiry, selected_strike = _derive_selected_leg_flags(
+            chain,
+            selection["snapshot"],
+        )
+        event_rows.loc[event_mask, "has_call_leg"] = has_call_leg
+        event_rows.loc[event_mask, "has_put_leg"] = has_put_leg
+        event_rows.loc[event_mask, "option_selected_expiration"] = selected_expiry
+        event_rows.loc[event_mask, "option_selected_strike"] = selected_strike
+
+        quality_flags = selection["quality_flags"]
+        if quality_flags["no_event_expiry_found"]:
+            event_rows.loc[event_mask, "no_usable_expiration"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "no_usable_expiration"
+            report["no_usable_expiration_events"] += 1
+            continue
+
         selected_rows = _extract_selected_leg_rows(chain, selection["snapshot"])
         if selected_rows is None:
+            event_rows.loc[event_mask, "missing_call_leg"] = not has_call_leg
+            event_rows.loc[event_mask, "missing_put_leg"] = not has_put_leg
+            event_rows.loc[event_mask, "no_valid_atm_pair"] = True
+            event_rows.loc[event_mask, "missing_options_data"] = True
+            event_rows.loc[event_mask, "option_coverage_status"] = "no_valid_atm_call_put_pair"
+            report["no_valid_atm_pair_events"] += 1
             report["selection_failed_events"] += 1
             continue
 
         call_row, put_row = selected_rows
+        event_rows.loc[event_mask, "historical_option_selection_success"] = True
+        event_rows.loc[event_mask, "option_coverage_status"] = "successful_selection"
+        event_rows.loc[event_mask, "missing_options_data"] = False
+        event_rows.loc[event_mask, "missing_call_leg"] = False
+        event_rows.loc[event_mask, "missing_put_leg"] = False
         for leg_row in (call_row, put_row):
             emitted_rows.append(
                 {
@@ -406,7 +583,15 @@ def load_trading_foundation_options_for_events(
 
     report["emitted_option_rows"] = len(emitted_rows)
     if not emitted_rows:
-        return _empty_historical_options_frame(), report
+        return TradingFoundationOptionLoadResult(
+            options_df=_empty_historical_options_frame(),
+            report=report,
+            event_diagnostics_df=event_rows.loc[:, OPTION_EVENT_DIAGNOSTIC_COLUMNS],
+        )
 
     options_df = pd.DataFrame(emitted_rows, columns=HISTORICAL_OPTION_EVENT_COLUMNS)
-    return options_df, report
+    return TradingFoundationOptionLoadResult(
+        options_df=options_df,
+        report=report,
+        event_diagnostics_df=event_rows.loc[:, OPTION_EVENT_DIAGNOSTIC_COLUMNS],
+    )

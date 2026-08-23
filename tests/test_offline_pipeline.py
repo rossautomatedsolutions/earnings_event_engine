@@ -46,6 +46,16 @@ ANALYSIS_REQUIRED_COLUMNS = {
 
 
 class OfflinePipelineTest(unittest.TestCase):
+    def _copy_tree(self, source: Path, destination: Path) -> None:
+        for path in source.rglob("*"):
+            relative = path.relative_to(source)
+            target = destination / relative
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
     def _run_pipeline(self, *extra_args: str) -> tuple[subprocess.CompletedProcess[str], Path]:
         tmp_dir = Path(tempfile.mkdtemp())
         output_dir = tmp_dir / "outputs"
@@ -137,6 +147,49 @@ class OfflinePipelineTest(unittest.TestCase):
         self.assertEqual(pd.Timestamp(msft["option_snapshot_quote_date"]).date().isoformat(), "2025-02-04")
         self.assertTrue(str(aapl["option_snapshot_source_path"]).endswith("AAPL_options_snapshot_2025-01-30.csv"))
         self.assertTrue(str(msft["option_snapshot_source_path"]).endswith("MSFT_options_snapshot_2025-02-04.csv"))
+
+    def test_trading_foundation_zero_selected_option_rows_writes_artifacts_and_reports_coverage(self) -> None:
+        tmp_root = Path(tempfile.mkdtemp())
+        self._copy_tree(TF_FIXTURE_ROOT / "AAPL" / "eod", tmp_root / "AAPL" / "eod")
+        self._copy_tree(TF_FIXTURE_ROOT / "MSFT" / "eod", tmp_root / "MSFT" / "eod")
+
+        result, output_dir = self._run_pipeline("--historical-data-root", str(tmp_root))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("KeyError: 'has_call_leg'", result.stderr + result.stdout)
+        self.assertIn("Zero valid/clean events produced during the validation stage", result.stderr)
+
+        features = pd.read_parquet(output_dir / "features.parquet")
+        diagnostics = pd.read_parquet(output_dir / "diagnostics.parquet")
+
+        self.assertEqual(
+            sorted(features["option_coverage_status"].astype(str).dropna().unique().tolist()),
+            ["missing_option_snapshot_directory"],
+        )
+        self.assertTrue(features["implied_move"].isna().all())
+        self.assertFalse(features["implied_move_available"].fillna(False).any())
+        self.assertIn("missing_option_snapshot_directory", diagnostics["metric"].astype(str).tolist())
+        self.assertIn("pct_missing_options", diagnostics["metric"].astype(str).tolist())
+
+    def test_trading_foundation_mixed_coverage_keeps_valid_rows_and_reports_missing_rows(self) -> None:
+        tmp_root = Path(tempfile.mkdtemp())
+        self._copy_tree(TF_FIXTURE_ROOT / "AAPL", tmp_root / "AAPL")
+        self._copy_tree(TF_FIXTURE_ROOT / "MSFT" / "eod", tmp_root / "MSFT" / "eod")
+
+        result, output_dir = self._run_pipeline("--historical-data-root", str(tmp_root))
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+
+        features = pd.read_parquet(output_dir / "features.parquet").set_index("ticker")
+        clean_events = pd.read_parquet(output_dir / "clean_events.parquet")
+        diagnostics = pd.read_parquet(output_dir / "diagnostics.parquet")
+
+        self.assertEqual(len(clean_events), 1)
+        self.assertEqual(clean_events["ticker"].astype(str).tolist(), ["AAPL"])
+        self.assertEqual(str(features.loc["AAPL", "option_coverage_status"]), "successful_selection")
+        self.assertEqual(str(features.loc["MSFT", "option_coverage_status"]), "missing_option_snapshot_directory")
+        self.assertIn("missing_option_snapshot_directory", diagnostics["metric"].astype(str).tolist())
+        self.assertIn("successful_selection", diagnostics["metric"].astype(str).tolist())
 
     def test_missing_option_data_leaves_implied_move_unavailable_without_hv_fallback(self) -> None:
         fixture_dir = self._make_fixture_dir(

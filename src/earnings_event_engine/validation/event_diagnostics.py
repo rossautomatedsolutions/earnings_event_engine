@@ -12,6 +12,45 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+EVENT_INTEGRITY_FLAG_COLUMNS = [
+    "missing_pre_close",
+    "missing_post_open",
+    "missing_post_close",
+    "invalid_nonpositive_prices",
+    "extreme_price_jump",
+    "missing_implied_move",
+    "implied_move_out_of_bounds",
+]
+TIMING_FLAG_COLUMNS = [
+    "missing_or_unknown_timing",
+    "inconsistent_timing_session_mapping",
+]
+OPTION_FLAG_COLUMNS = [
+    "missing_options_data",
+    "bid_ask_spread_invalid",
+    "atm_strike_too_far",
+    "missing_call_leg",
+    "missing_put_leg",
+    "zero_or_nan_mid",
+    "missing_ticker_directory",
+    "missing_eod_history",
+    "missing_option_snapshot_directory",
+    "missing_required_snapshot_file",
+    "snapshot_unparseable",
+    "no_usable_expiration",
+    "no_valid_atm_pair",
+]
+OPTION_METADATA_COLUMNS = [
+    "has_call_leg",
+    "has_put_leg",
+    "option_coverage_status",
+    "historical_option_selection_success",
+    "option_snapshot_quote_date",
+    "option_snapshot_source_path",
+    "option_selected_expiration",
+    "option_selected_strike",
+]
+
 
 @dataclass(frozen=True)
 class DiagnosticsConfig:
@@ -93,7 +132,19 @@ def _aggregate_options_flags(
     config: DiagnosticsConfig,
 ) -> pd.DataFrame:
     if options_df.empty:
-        return pd.DataFrame(columns=[event_key_col])
+        return pd.DataFrame(
+            columns=[
+                event_key_col,
+                "has_call_leg",
+                "has_put_leg",
+                "bid_ask_spread_invalid",
+                "zero_or_nan_mid",
+                "min_atm_strike_distance_pct",
+                "atm_strike_too_far",
+                "missing_call_leg",
+                "missing_put_leg",
+            ]
+        )
 
     working = options_df.copy()
 
@@ -155,6 +206,132 @@ def _aggregate_options_flags(
     return result.reset_index()
 
 
+def _coerce_bool(series: pd.Series | object, *, default: bool = False) -> pd.Series:
+    if not isinstance(series, pd.Series):
+        series = pd.Series(series)
+    if series.empty:
+        return pd.Series(dtype=bool)
+    return series.astype("boolean").fillna(default).astype(bool)
+
+
+def _default_options_flags(events_with_key: pd.DataFrame, event_key_col: str) -> pd.DataFrame:
+    out = pd.DataFrame({event_key_col: events_with_key[event_key_col]})
+    out["has_call_leg"] = False
+    out["has_put_leg"] = False
+    out["bid_ask_spread_invalid"] = False
+    out["atm_strike_too_far"] = False
+    out["missing_call_leg"] = False
+    out["missing_put_leg"] = False
+    out["zero_or_nan_mid"] = False
+    out["missing_options_data"] = False
+    out["missing_ticker_directory"] = False
+    out["missing_eod_history"] = False
+    out["missing_option_snapshot_directory"] = False
+    out["missing_required_snapshot_file"] = False
+    out["snapshot_unparseable"] = False
+    out["no_usable_expiration"] = False
+    out["no_valid_atm_pair"] = False
+    out["option_coverage_status"] = "unknown"
+    out["historical_option_selection_success"] = False
+    out["option_snapshot_quote_date"] = pd.NaT
+    out["option_snapshot_source_path"] = pd.NA
+    out["option_selected_expiration"] = pd.NaT
+    out["option_selected_strike"] = pd.NA
+    return out
+
+
+def _merge_explicit_option_event_flags(
+    events_with_key: pd.DataFrame,
+    *,
+    event_key_col: str,
+    options_event_flags_df: pd.DataFrame | None,
+    options_df: pd.DataFrame | None,
+    option_type_col: str,
+    strike_col: str,
+    underlying_price_col: str,
+    bid_col: str,
+    ask_col: str,
+    mid_col: str,
+    config: DiagnosticsConfig,
+) -> pd.DataFrame:
+    out = _default_options_flags(events_with_key, event_key_col)
+
+    raw_agg = _aggregate_options_flags(
+        options_df if options_df is not None else pd.DataFrame(columns=[event_key_col]),
+        event_key_col=event_key_col,
+        option_type_col=option_type_col,
+        strike_col=strike_col,
+        underlying_price_col=underlying_price_col,
+        bid_col=bid_col,
+        ask_col=ask_col,
+        mid_col=mid_col,
+        config=config,
+    )
+    raw_merged = out[[event_key_col]].merge(raw_agg, on=event_key_col, how="left")
+
+    explicit = pd.DataFrame(columns=[event_key_col])
+    if options_event_flags_df is not None and not options_event_flags_df.empty:
+        explicit = options_event_flags_df.copy()
+        if event_key_col not in explicit.columns:
+            raise ValueError(
+                f"options_event_flags_df must include the event key column '{event_key_col}'."
+            )
+        explicit = out[[event_key_col]].merge(explicit, on=event_key_col, how="left")
+    else:
+        explicit = out[[event_key_col]].copy()
+
+    for column in ["has_call_leg", "has_put_leg"]:
+        raw_values = raw_merged[column] if column in raw_merged.columns else pd.Series(index=out.index, dtype=object)
+        explicit_values = explicit[column] if column in explicit.columns else pd.Series(index=out.index, dtype=object)
+        combined = raw_values.combine_first(explicit_values).fillna(False)
+        out[column] = _coerce_bool(combined, default=False)
+
+    for column in ["bid_ask_spread_invalid", "atm_strike_too_far", "missing_call_leg", "missing_put_leg", "zero_or_nan_mid"]:
+        raw_values = raw_merged[column] if column in raw_merged.columns else pd.Series(index=out.index, dtype=object)
+        explicit_values = explicit[column] if column in explicit.columns else pd.Series(index=out.index, dtype=object)
+        combined = raw_values.combine_first(explicit_values).fillna(False)
+        out[column] = _coerce_bool(combined, default=False)
+
+    for column in [
+        "missing_options_data",
+        "missing_ticker_directory",
+        "missing_eod_history",
+        "missing_option_snapshot_directory",
+        "missing_required_snapshot_file",
+        "snapshot_unparseable",
+        "no_usable_expiration",
+        "no_valid_atm_pair",
+        "historical_option_selection_success",
+    ]:
+        if column in explicit.columns:
+            out[column] = _coerce_bool(explicit[column], default=False)
+
+    if "option_coverage_status" in explicit.columns:
+        out["option_coverage_status"] = explicit["option_coverage_status"].astype("string").fillna("unknown")
+
+    for column in ["option_snapshot_quote_date", "option_selected_expiration"]:
+        if column in explicit.columns:
+            out[column] = pd.to_datetime(explicit[column], errors="coerce")
+
+    for column in ["option_snapshot_source_path", "option_selected_strike"]:
+        if column in explicit.columns:
+            out[column] = explicit[column]
+
+    if options_event_flags_df is None:
+        missing_options_mask = raw_merged["has_call_leg"].isna() & raw_merged["has_put_leg"].isna()
+        out["missing_options_data"] = _coerce_bool(missing_options_mask, default=False)
+        out.loc[out["missing_options_data"], "option_coverage_status"] = "no_option_rows_provided"
+        out.loc[
+            (~out["missing_options_data"]) & out["has_call_leg"] & out["has_put_leg"],
+            "option_coverage_status",
+        ] = "successful_selection"
+    else:
+        raw_missing_mask = raw_merged["has_call_leg"].isna() & raw_merged["has_put_leg"].isna()
+        out.loc[raw_missing_mask & (out["option_coverage_status"] == "unknown"), "missing_options_data"] = True
+
+    return out
+
+
 def _validate_timing(
     events_df: pd.DataFrame,
     *,
@@ -206,6 +383,7 @@ def _validate_timing(
 def run_event_diagnostics(
     events_df: pd.DataFrame,
     options_df: pd.DataFrame | None = None,
+    options_event_flags_df: pd.DataFrame | None = None,
     *,
     event_key_col: str = "event_id",
     pre_close_col: str = "pre_close",
@@ -253,22 +431,16 @@ def run_event_diagnostics(
         mapped_session_col=mapped_session_col,
     )
 
-    if options_df is None:
-        options_flags = pd.DataFrame(
-            {
-                resolved_event_key: events_with_key[resolved_event_key],
-                "missing_options_data": True,
-                "bid_ask_spread_invalid": False,
-                "atm_strike_too_far": False,
-                "missing_call_leg": False,
-                "missing_put_leg": False,
-                "zero_or_nan_mid": False,
-            }
-        )
+    if options_df is None and options_event_flags_df is None:
+        options_flags = _default_options_flags(events_with_key, resolved_event_key)
+        options_flags["missing_options_data"] = True
+        options_flags["option_coverage_status"] = "no_option_rows_provided"
     else:
-        option_agg = _aggregate_options_flags(
-            options_df,
+        options_flags = _merge_explicit_option_event_flags(
+            events_with_key,
             event_key_col=resolved_event_key,
+            options_event_flags_df=options_event_flags_df,
+            options_df=options_df,
             option_type_col=option_type_col,
             strike_col=strike_col,
             underlying_price_col=underlying_price_col,
@@ -277,31 +449,6 @@ def run_event_diagnostics(
             mid_col=mid_col,
             config=config,
         )
-        options_flags = events_with_key[[resolved_event_key]].merge(option_agg, on=resolved_event_key, how="left")
-        options_flags["missing_options_data"] = options_flags["has_call_leg"].isna() & options_flags[
-            "has_put_leg"
-        ].isna()
-
-        for col in [
-            "bid_ask_spread_invalid",
-            "atm_strike_too_far",
-            "missing_call_leg",
-            "missing_put_leg",
-            "zero_or_nan_mid",
-        ]:
-            options_flags[col] = options_flags[col].eq(True)
-
-        options_flags = options_flags[
-            [
-                resolved_event_key,
-                "missing_options_data",
-                "bid_ask_spread_invalid",
-                "atm_strike_too_far",
-                "missing_call_leg",
-                "missing_put_leg",
-                "zero_or_nan_mid",
-            ]
-        ]
 
     flags_df = pd.concat(
         [
@@ -313,7 +460,11 @@ def run_event_diagnostics(
         axis=1,
     )
 
-    flag_columns = [col for col in flags_df.columns if col != resolved_event_key]
+    flag_columns = [
+        *EVENT_INTEGRITY_FLAG_COLUMNS,
+        *TIMING_FLAG_COLUMNS,
+        *[column for column in OPTION_FLAG_COLUMNS if column in flags_df.columns],
+    ]
     flags_df["invalid_event"] = flags_df[flag_columns].any(axis=1)
     flags_df["valid_event"] = ~flags_df["invalid_event"]
 
@@ -373,6 +524,24 @@ def run_event_diagnostics(
             },
         ]
     )
+
+    if "option_coverage_status" in options_flags.columns:
+        status_counts = (
+            options_flags["option_coverage_status"]
+            .astype("string")
+            .fillna("unknown")
+            .value_counts(dropna=False)
+            .sort_index()
+        )
+        for status, count in status_counts.items():
+            summary_rows.append(
+                {
+                    "category": "option_coverage_status",
+                    "metric": str(status),
+                    "count": int(count),
+                    "pct_of_events": int(count) / total_events if total_events else 0.0,
+                }
+            )
 
     diagnostics_summary_df = pd.DataFrame(summary_rows)
 

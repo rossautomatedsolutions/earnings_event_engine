@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import builtins
 import subprocess
 import sys
 import tempfile
@@ -560,14 +561,19 @@ class FullResearchPipelineTest(unittest.TestCase):
         self.assertEqual(self._stage(report, full_pipeline.CONDITIONALS_STAGE).status, "FAILED")
 
     def test_run_visuals_requires_matplotlib_when_enabled(self) -> None:
-        result, _ = self._run_cli("--run-visuals")
-        combined_output = result.stdout + result.stderr
+        real_import = builtins.__import__
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("FINAL STATUS: FAILED", combined_output)
-        self.assertIn(f"Failed stage: {full_pipeline.VISUALS_STAGE}", combined_output)
-        self.assertIn("matplotlib", combined_output)
-        self.assertNotIn("FINAL STATUS: SUCCESS", combined_output)
+        def _fake_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+            if name == "matplotlib" or name.startswith("matplotlib."):
+                raise ModuleNotFoundError("No module named 'matplotlib'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=_fake_import):
+            with self.assertRaises(full_pipeline.StageFailure) as exc_info:
+                full_pipeline.run_visuals_stage(REPO_ROOT / "tests" / "fixtures" / "offline_pipeline" / "options.csv")
+
+        self.assertEqual(exc_info.exception.stage_name, full_pipeline.VISUALS_STAGE)
+        self.assertIn("matplotlib", exc_info.exception.detail)
 
 
 if __name__ == "__main__":

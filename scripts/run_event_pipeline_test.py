@@ -73,6 +73,8 @@ ENRICHED_EVENT_COLUMNS = [
     "option_snapshot_source_path",
     "option_selected_expiration",
     "option_selected_strike",
+    "option_coverage_status",
+    "historical_option_selection_success",
     "price_alignment_valid",
 ]
 FEATURE_COLUMNS = [
@@ -102,6 +104,8 @@ FEATURE_COLUMNS = [
     "option_snapshot_source_path",
     "option_selected_expiration",
     "option_selected_strike",
+    "option_coverage_status",
+    "historical_option_selection_success",
     "realized_gap_move",
     "realized_close_move",
     "iv_minus_realized_gap",
@@ -193,6 +197,43 @@ def _empty_features_frame() -> pd.DataFrame:
 
 def _empty_diagnostics_flags() -> pd.DataFrame:
     return pd.DataFrame(columns=DIAGNOSTICS_FLAG_COLUMNS)
+
+
+def _merge_option_event_metadata(
+    events_with_prices: pd.DataFrame,
+    option_event_flags_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if option_event_flags_df is None or option_event_flags_df.empty or events_with_prices.empty:
+        return events_with_prices
+
+    metadata_columns = [
+        "event_id",
+        "option_coverage_status",
+        "historical_option_selection_success",
+        "option_snapshot_quote_date",
+        "option_snapshot_source_path",
+        "option_selected_expiration",
+        "option_selected_strike",
+    ]
+    available_columns = [column for column in metadata_columns if column in option_event_flags_df.columns]
+    if "event_id" not in available_columns:
+        return events_with_prices
+
+    out = events_with_prices.drop(
+        columns=[column for column in available_columns if column != "event_id"],
+        errors="ignore",
+    ).merge(
+        option_event_flags_df[available_columns].copy(),
+        on="event_id",
+        how="left",
+    )
+
+    if "historical_option_selection_success" in out.columns:
+        out["historical_option_selection_success"] = (
+            out["historical_option_selection_success"].astype("boolean").fillna(False).astype(bool)
+        )
+
+    return out
 
 
 def _base_diagnostics_summary() -> pd.DataFrame:
@@ -510,6 +551,8 @@ def load_prices_and_compute_moves(
         group["option_snapshot_source_path"] = pd.NA
         group["option_selected_expiration"] = pd.NaT
         group["option_selected_strike"] = pd.NA
+        group["option_coverage_status"] = pd.NA
+        group["historical_option_selection_success"] = False
         group["price_alignment_valid"] = False
 
         if history.empty:
@@ -944,6 +987,7 @@ def main() -> None:
     feature_df = _empty_features_frame()
     diagnostics_summary = _base_diagnostics_summary()
     diagnostics_flags = _empty_diagnostics_flags()
+    option_event_flags_df: pd.DataFrame | None = None
     runtime_metrics: list[str] = []
     failure_messages: list[str] = []
 
@@ -975,15 +1019,24 @@ def main() -> None:
                     f"tickers_with_local_eod={price_panel['ticker'].nunique() if not price_panel.empty else 0}"
                 )
                 events_with_prices = load_prices_and_compute_moves(events, price_panel_df=price_panel)
-                options_df, options_report = load_trading_foundation_options_for_events(
+                options_load_result = load_trading_foundation_options_for_events(
                     events_with_prices,
                     historical_data_root,
                 )
+                options_df = options_load_result.options_df
+                options_report = options_load_result.report
+                option_event_flags_df = options_load_result.event_diagnostics_df
                 print(
                     "[INFO] option_data_source=trading_foundation_option_snapshot "
                     f"requested_events={options_report['requested_events']} "
                     f"events_with_selected_options={options_report['events_with_selected_options']} "
+                    f"missing_ticker_directory_events={options_report['missing_ticker_directory_events']} "
+                    f"missing_eod_history_events={options_report['missing_eod_history_events']} "
+                    f"missing_option_snapshot_directory_events={options_report['missing_option_snapshot_directory_events']} "
                     f"missing_snapshot_file_events={options_report['missing_snapshot_file_events']} "
+                    f"snapshot_unparseable_events={options_report['snapshot_unparseable_events']} "
+                    f"no_usable_expiration_events={options_report['no_usable_expiration_events']} "
+                    f"no_valid_atm_pair_events={options_report['no_valid_atm_pair_events']} "
                     f"selection_failed_events={options_report['selection_failed_events']}"
                 )
             else:
@@ -995,6 +1048,7 @@ def main() -> None:
                     + ("fixture_options" if options_df is not None and not options_df.empty else "none")
                 )
             events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
+            events_with_prices = _merge_option_event_metadata(events_with_prices, option_event_flags_df)
             feature_df = generate_features(events_with_prices)
         else:
             events = retrieve_and_normalize_events(tickers, start_date, end_date, args.max_events)
@@ -1009,15 +1063,24 @@ def main() -> None:
                     f"tickers_with_local_eod={price_panel['ticker'].nunique() if not price_panel.empty else 0}"
                 )
                 events_with_prices = load_prices_and_compute_moves(events, price_panel_df=price_panel)
-                options_df, options_report = load_trading_foundation_options_for_events(
+                options_load_result = load_trading_foundation_options_for_events(
                     events_with_prices,
                     historical_data_root,
                 )
+                options_df = options_load_result.options_df
+                options_report = options_load_result.report
+                option_event_flags_df = options_load_result.event_diagnostics_df
                 print(
                     "[INFO] option_data_source=trading_foundation_option_snapshot "
                     f"requested_events={options_report['requested_events']} "
                     f"events_with_selected_options={options_report['events_with_selected_options']} "
+                    f"missing_ticker_directory_events={options_report['missing_ticker_directory_events']} "
+                    f"missing_eod_history_events={options_report['missing_eod_history_events']} "
+                    f"missing_option_snapshot_directory_events={options_report['missing_option_snapshot_directory_events']} "
                     f"missing_snapshot_file_events={options_report['missing_snapshot_file_events']} "
+                    f"snapshot_unparseable_events={options_report['snapshot_unparseable_events']} "
+                    f"no_usable_expiration_events={options_report['no_usable_expiration_events']} "
+                    f"no_valid_atm_pair_events={options_report['no_valid_atm_pair_events']} "
                     f"selection_failed_events={options_report['selection_failed_events']}"
                 )
             else:
@@ -1026,12 +1089,14 @@ def main() -> None:
                 print("[INFO] price_data_source=yfinance")
                 print("[INFO] option_data_source=none")
             events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
+            events_with_prices = _merge_option_event_metadata(events_with_prices, option_event_flags_df)
             feature_df = generate_features(events_with_prices)
 
         if not events_with_prices.empty:
             clean_events, diagnostics_summary, diagnostics_flags = run_event_diagnostics(
                 events_with_prices,
                 options_df=options_df,
+                options_event_flags_df=option_event_flags_df,
                 event_key_col="event_id",
                 pre_close_col="pre_close",
                 post_open_col="post_open",
@@ -1113,6 +1178,7 @@ def main() -> None:
         "implied_move_available",
         "implied_move_source",
         "option_snapshot_quote_date",
+        "option_coverage_status",
         "realized_gap_move",
         "surprise_vs_implied",
         "valid_event",
