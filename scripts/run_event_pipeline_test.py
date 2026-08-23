@@ -22,6 +22,10 @@ for path in (REPO_ROOT, SRC_PATH):
         sys.path.insert(0, str(path))
 
 from data.earnings_calendar import EarningsCalendarRetrievalError, get_earnings_dates
+from data.trading_foundation import (
+    load_trading_foundation_eod_panel,
+    load_trading_foundation_options_for_events,
+)
 from earnings_event_engine.validation import build_data_coverage_report, run_event_diagnostics
 from src.events import align_event_to_sessions
 from src.events.timing import (
@@ -51,6 +55,8 @@ EVENT_BASE_COLUMNS = [
 ]
 ENRICHED_EVENT_COLUMNS = [
     *EVENT_BASE_COLUMNS,
+    "pre_event_date",
+    "post_event_date",
     "pre_close",
     "post_open",
     "post_close",
@@ -63,6 +69,10 @@ ENRICHED_EVENT_COLUMNS = [
     "option_straddle_mid",
     "implied_move_dollars",
     "implied_move",
+    "option_snapshot_quote_date",
+    "option_snapshot_source_path",
+    "option_selected_expiration",
+    "option_selected_strike",
     "price_alignment_valid",
 ]
 FEATURE_COLUMNS = [
@@ -73,6 +83,8 @@ FEATURE_COLUMNS = [
     "timing",
     "announcement_timing",
     "mapped_session",
+    "pre_event_date",
+    "post_event_date",
     "price_alignment_valid",
     "option_snapshot_available",
     "implied_move_available",
@@ -86,6 +98,10 @@ FEATURE_COLUMNS = [
     "option_straddle_mid",
     "implied_move_dollars",
     "implied_move",
+    "option_snapshot_quote_date",
+    "option_snapshot_source_path",
+    "option_selected_expiration",
+    "option_selected_strike",
     "realized_gap_move",
     "realized_close_move",
     "iv_minus_realized_gap",
@@ -142,6 +158,16 @@ def parse_args() -> argparse.Namespace:
         "--allow-empty",
         action="store_true",
         help="Allow zero raw or zero validated rows without returning a non-zero exit code.",
+    )
+    parser.add_argument(
+        "--historical-data-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Trading_Foundation historical_data root. When provided, the pipeline loads "
+            "canonical EOD prices plus daily option_snapshot files from that root instead of "
+            "using fixture prices/options or live yfinance prices."
+        ),
     )
     return parser.parse_args()
 
@@ -466,6 +492,8 @@ def load_prices_and_compute_moves(
             )
 
         group = group.copy()
+        group["pre_event_date"] = pd.NaT
+        group["post_event_date"] = pd.NaT
         group["pre_close"] = pd.NA
         group["post_open"] = pd.NA
         group["post_close"] = pd.NA
@@ -478,6 +506,10 @@ def load_prices_and_compute_moves(
         group["option_straddle_mid"] = pd.NA
         group["implied_move_dollars"] = pd.NA
         group["implied_move"] = pd.NA
+        group["option_snapshot_quote_date"] = pd.NaT
+        group["option_snapshot_source_path"] = pd.NA
+        group["option_selected_expiration"] = pd.NaT
+        group["option_selected_strike"] = pd.NA
         group["price_alignment_valid"] = False
 
         if history.empty:
@@ -513,6 +545,8 @@ def load_prices_and_compute_moves(
             pre_date = pd.Timestamp(alignment["pre_event_date"])
             post_date = pd.Timestamp(alignment["post_event_date"])
 
+            group.at[row_idx, "pre_event_date"] = pre_date
+            group.at[row_idx, "post_event_date"] = post_date
             group.at[row_idx, "pre_close"] = history.loc[pre_date, "close"]
             hv = history.loc[pre_date, "hv20"]
             if isinstance(hv, pd.Series):
@@ -610,6 +644,10 @@ def attach_event_time_option_implied_moves(
         "option_straddle_mid": pd.NA,
         "implied_move_dollars": pd.NA,
         "implied_move": pd.NA,
+        "option_snapshot_quote_date": pd.NaT,
+        "option_snapshot_source_path": pd.NA,
+        "option_selected_expiration": pd.NaT,
+        "option_selected_strike": pd.NA,
     }
     for column, default_value in defaults.items():
         if column not in enriched.columns:
@@ -661,6 +699,19 @@ def attach_event_time_option_implied_moves(
         put_row = put_rows.iloc[0]
         call_mid = pd.to_numeric(pd.Series([call_row["option_mid"]]), errors="coerce").iloc[0]
         put_mid = pd.to_numeric(pd.Series([put_row["option_mid"]]), errors="coerce").iloc[0]
+        selected_expiration = pd.to_datetime(
+            call_row.get("expiration", put_row.get("expiration")),
+            errors="coerce",
+        )
+        selected_strike = pd.to_numeric(pd.Series([atm_strike]), errors="coerce").iloc[0]
+        snapshot_quote_date = pd.to_datetime(
+            call_row.get("option_snapshot_quote_date", put_row.get("option_snapshot_quote_date")),
+            errors="coerce",
+        )
+        snapshot_source_path = call_row.get(
+            "option_snapshot_source_path",
+            put_row.get("option_snapshot_source_path"),
+        )
         spot_candidates = pd.to_numeric(
             pd.Series([call_row["underlying_price"], put_row["underlying_price"]]),
             errors="coerce",
@@ -687,6 +738,10 @@ def attach_event_time_option_implied_moves(
                 "option_straddle_mid": straddle_mid,
                 "implied_move_dollars": straddle_mid,
                 "implied_move": implied_move,
+                "option_snapshot_quote_date": snapshot_quote_date,
+                "option_snapshot_source_path": snapshot_source_path,
+                "option_selected_expiration": selected_expiration,
+                "option_selected_strike": selected_strike,
             }
         )
 
@@ -704,6 +759,10 @@ def attach_event_time_option_implied_moves(
             "option_straddle_mid",
             "implied_move_dollars",
             "implied_move",
+            "option_snapshot_quote_date",
+            "option_snapshot_source_path",
+            "option_selected_expiration",
+            "option_selected_strike",
         ],
         errors="ignore",
     ).merge(option_metrics, on="event_id", how="left")
@@ -861,6 +920,7 @@ def _safe_to_parquet(df: pd.DataFrame, output_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     tickers = _normalize_ticker_list(args.tickers)
+    historical_data_root = Path(args.historical_data_root) if args.historical_data_root is not None else None
 
     if args.max_events <= 0:
         raise ValueError("--max-events must be > 0.")
@@ -875,6 +935,8 @@ def main() -> None:
     mode_label = "fixture" if args.fixture_dir is not None else "live"
     print(f"[INFO] run_mode={mode_label}")
     print(f"[INFO] allow_empty={args.allow_empty}")
+    if historical_data_root is not None:
+        print(f"[INFO] historical_data_root={historical_data_root.resolve()}")
 
     events = _empty_events_frame()
     events_with_prices = _empty_enriched_events_frame()
@@ -902,14 +964,67 @@ def main() -> None:
                 args.max_events,
                 events_source_df=fixture_events,
             )
-            options_df = load_fixture_options_for_events(events, fixture_options_source)
-            events_with_prices = load_prices_and_compute_moves(events, price_panel_df=fixture_prices)
+            if historical_data_root is not None:
+                price_panel = load_trading_foundation_eod_panel(
+                    historical_data_root,
+                    events["ticker"].astype("string").dropna().tolist() if "ticker" in events.columns else [],
+                )
+                print(
+                    "[INFO] price_data_source=trading_foundation_eod "
+                    f"price_rows={len(price_panel)} "
+                    f"tickers_with_local_eod={price_panel['ticker'].nunique() if not price_panel.empty else 0}"
+                )
+                events_with_prices = load_prices_and_compute_moves(events, price_panel_df=price_panel)
+                options_df, options_report = load_trading_foundation_options_for_events(
+                    events_with_prices,
+                    historical_data_root,
+                )
+                print(
+                    "[INFO] option_data_source=trading_foundation_option_snapshot "
+                    f"requested_events={options_report['requested_events']} "
+                    f"events_with_selected_options={options_report['events_with_selected_options']} "
+                    f"missing_snapshot_file_events={options_report['missing_snapshot_file_events']} "
+                    f"selection_failed_events={options_report['selection_failed_events']}"
+                )
+            else:
+                options_df = load_fixture_options_for_events(events, fixture_options_source)
+                events_with_prices = load_prices_and_compute_moves(events, price_panel_df=fixture_prices)
+                print("[INFO] price_data_source=fixture_prices")
+                print(
+                    "[INFO] option_data_source="
+                    + ("fixture_options" if options_df is not None and not options_df.empty else "none")
+                )
             events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
             feature_df = generate_features(events_with_prices)
         else:
             events = retrieve_and_normalize_events(tickers, start_date, end_date, args.max_events)
-            events_with_prices = load_prices_and_compute_moves(events)
-            options_df = None
+            if historical_data_root is not None:
+                price_panel = load_trading_foundation_eod_panel(
+                    historical_data_root,
+                    events["ticker"].astype("string").dropna().tolist() if "ticker" in events.columns else tickers,
+                )
+                print(
+                    "[INFO] price_data_source=trading_foundation_eod "
+                    f"price_rows={len(price_panel)} "
+                    f"tickers_with_local_eod={price_panel['ticker'].nunique() if not price_panel.empty else 0}"
+                )
+                events_with_prices = load_prices_and_compute_moves(events, price_panel_df=price_panel)
+                options_df, options_report = load_trading_foundation_options_for_events(
+                    events_with_prices,
+                    historical_data_root,
+                )
+                print(
+                    "[INFO] option_data_source=trading_foundation_option_snapshot "
+                    f"requested_events={options_report['requested_events']} "
+                    f"events_with_selected_options={options_report['events_with_selected_options']} "
+                    f"missing_snapshot_file_events={options_report['missing_snapshot_file_events']} "
+                    f"selection_failed_events={options_report['selection_failed_events']}"
+                )
+            else:
+                events_with_prices = load_prices_and_compute_moves(events)
+                options_df = None
+                print("[INFO] price_data_source=yfinance")
+                print("[INFO] option_data_source=none")
             events_with_prices = attach_event_time_option_implied_moves(events_with_prices, options_df)
             feature_df = generate_features(events_with_prices)
 
@@ -997,6 +1112,7 @@ def main() -> None:
         "implied_move",
         "implied_move_available",
         "implied_move_source",
+        "option_snapshot_quote_date",
         "realized_gap_move",
         "surprise_vs_implied",
         "valid_event",

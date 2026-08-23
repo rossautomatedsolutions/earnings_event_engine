@@ -165,10 +165,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "This stage is excluded from the default canonical contract."
         ),
     )
+    parser.add_argument(
+        "--historical-data-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Trading_Foundation historical_data root. When provided, the event pipeline "
+            "consumes canonical local EOD plus option_snapshot data instead of fixture prices/options "
+            "or live yfinance prices."
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def _print_header(report: ResearchRunReport, fixture_dir: Path | None) -> None:
+def _print_header(
+    report: ResearchRunReport,
+    fixture_dir: Path | None,
+    historical_data_root: Path | None,
+) -> None:
     print("=== Full Research Pipeline ===")
     print(f"mode={report.mode}")
     print(f"output_dir={report.output_dir.resolve()}")
@@ -176,6 +190,10 @@ def _print_header(report: ResearchRunReport, fixture_dir: Path | None) -> None:
         print(f"fixture_dir={fixture_dir.resolve()}")
     else:
         print("fixture_dir=<live mode>")
+    if historical_data_root is not None:
+        print(f"historical_data_root={historical_data_root.resolve()}")
+    else:
+        print("historical_data_root=<not set>")
 
 
 def _trim_output(text: str) -> str:
@@ -396,6 +414,7 @@ def run_canonical_event_pipeline_stage(
     *,
     output_dir: Path,
     fixture_dir: Path | None,
+    historical_data_root: Path | None,
     tickers: str | None,
     start_date: str,
     end_date: str,
@@ -406,6 +425,7 @@ def run_canonical_event_pipeline_stage(
     pipeline_artifacts, detail = run_event_pipeline_stage(
         output_dir=output_dir,
         fixture_dir=fixture_dir,
+        historical_data_root=historical_data_root,
         tickers=tickers,
         start_date=start_date,
         end_date=end_date,
@@ -432,6 +452,7 @@ def run_event_pipeline_stage(
     *,
     output_dir: Path,
     fixture_dir: Path | None,
+    historical_data_root: Path | None,
     tickers: str | None,
     start_date: str,
     end_date: str,
@@ -453,6 +474,8 @@ def run_event_pipeline_stage(
         "--output-dir",
         str(output_dir),
     ]
+    if historical_data_root is not None:
+        command.extend(["--historical-data-root", str(historical_data_root)])
     if fixture_dir is not None:
         command.extend(["--fixture-dir", str(fixture_dir)])
     else:
@@ -646,6 +669,7 @@ def run_full_research_pipeline(
     end_date: str,
     max_events: int,
     run_visuals: bool,
+    historical_data_root: Path | None = None,
 ) -> ResearchRunReport:
     """Run the required research stages and return an honest run report."""
 
@@ -657,7 +681,7 @@ def run_full_research_pipeline(
         output_dir=Path(output_dir),
     )
 
-    _print_header(report, fixture_dir)
+    _print_header(report, fixture_dir, historical_data_root)
 
     try:
         pipeline_artifacts = _run_stage(
@@ -667,6 +691,7 @@ def run_full_research_pipeline(
             stage_fn=lambda: run_canonical_event_pipeline_stage(
                 output_dir=Path(output_dir),
                 fixture_dir=fixture_dir,
+                historical_data_root=historical_data_root,
                 tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
@@ -743,6 +768,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = run_full_research_pipeline(
         output_dir=args.output_dir,
         fixture_dir=args.fixture_dir,
+        historical_data_root=args.historical_data_root,
         tickers=args.tickers,
         start_date=args.start_date,
         end_date=args.end_date,

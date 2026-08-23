@@ -29,6 +29,7 @@ from scripts import run_full_research_pipeline as full_pipeline
 
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "offline_pipeline"
+TF_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "trading_foundation_historical_data"
 FULL_PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_full_research_pipeline.py"
 
 
@@ -191,6 +192,26 @@ class FullResearchPipelineTest(unittest.TestCase):
         self.assertAlmostEqual(float(validated_by_ticker.loc["AAPL", "implied_move"]), (4.8 + 4.7) / 104.5, places=6)
         self.assertAlmostEqual(float(validated_by_ticker.loc["MSFT", "implied_move"]), (5.2 + 5.1) / 210.0, places=6)
         self.assertTrue(validated_features["implied_move_available"].fillna(False).all())
+
+    def test_cli_fixture_run_can_use_trading_foundation_historical_root(self) -> None:
+        result, output_dir = self._run_cli("--historical-data-root", str(TF_FIXTURE_ROOT))
+        combined_output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, msg=combined_output)
+        self.assertIn("historical_data_root=", combined_output)
+        self.assertIn("option_data_source=trading_foundation_option_snapshot", combined_output)
+
+        validated_features = pd.read_parquet(output_dir / full_pipeline.VALIDATED_FEATURES_FILENAME).set_index("ticker")
+        self.assertAlmostEqual(float(validated_features.loc["AAPL", "implied_move"]), (6.0 + 5.8) / 106.0, places=6)
+        self.assertAlmostEqual(float(validated_features.loc["MSFT", "implied_move"]), (6.2 + 6.0) / 205.0, places=6)
+        self.assertEqual(
+            pd.Timestamp(validated_features.loc["AAPL", "option_snapshot_quote_date"]).date().isoformat(),
+            "2025-01-30",
+        )
+        self.assertEqual(
+            pd.Timestamp(validated_features.loc["MSFT", "option_snapshot_quote_date"]).date().isoformat(),
+            "2025-02-04",
+        )
 
     def test_mixed_validity_fixture_routes_only_validated_rows_to_required_downstream_stages(self) -> None:
         fixture_dir = self._make_fixture_dir(

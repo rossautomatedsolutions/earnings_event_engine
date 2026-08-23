@@ -118,6 +118,48 @@ What the fixture does **not** prove:
 - successful option-based strategy output is still a simplified research proxy unless actual historical option entry/exit premiums are modeled
 - trading profitability or research efficacy
 
+## Trading_Foundation Historical Data
+
+`scripts/run_event_pipeline_test.py` and `scripts/run_full_research_pipeline.py` now support:
+
+```powershell
+--historical-data-root <path-to-Trading_Foundation\historical_data>
+```
+
+When this flag is provided, the pipeline:
+
+- loads daily underlying bars from `historical_data/<TICKER>/eod/<TICKER>_1D.csv`
+- loads daily historical option chains from `historical_data/<TICKER>/option_snapshot/*_options_snapshot_YYYY-MM-DD.csv`
+- derives `expiration`, `strike`, and `option_type` from OCC-style `option_symbol`
+- selects the first expiration strictly after the earnings event and the ATM call/put pair nearest the pre-event underlying close
+- preserves `hv20_expected_move_proxy` as a separate context-only field rather than a fallback implied move
+
+Current repo requirements mapped to Trading Foundation:
+
+- Required now: underlying daily EOD bars and daily historical `option_snapshot`
+- Not currently required by this repo: underlying intraday bars, `option_ohlc`, IV surface files, IV rank/percentile files
+
+Timing behavior for daily snapshots:
+
+- `AMC` events use the same-day pre-event trading session snapshot date
+- `BMO` events use the prior trading-session snapshot date
+
+Representative command using canonical local historical data:
+
+```powershell
+python scripts\run_full_research_pipeline.py --tickers AAPL,MSFT --start-date 2025-01-01 --end-date 2025-12-31 --max-events 20 --historical-data-root C:\Users\RAS\OneDrive\RAS\Trading\Live\Trading_Foundation\historical_data --output-dir outputs\main_machine_tf_validation
+```
+
+The feature artifact now includes option provenance columns such as:
+
+- `pre_event_date`
+- `option_snapshot_quote_date`
+- `option_snapshot_source_path`
+- `option_selected_expiration`
+- `option_selected_strike`
+
+These make it possible to audit whether daily historical snapshots were aligned to the intended pre-event session.
+
 ## Historical IV Caveat
 
 `run_analysis.py` no longer reuses a current option-chain IV snapshot across historical earnings rows.
@@ -157,13 +199,13 @@ python scripts\run_event_pipeline_test.py --fixture-dir tests\fixtures\offline_p
 ## Regression Check
 
 ```powershell
-python -m unittest tests.test_data_coverage_regression -v
+python -m unittest tests.test_data_coverage_regression tests.test_trading_foundation_adapter tests.test_offline_pipeline tests.test_full_research_pipeline -v
 ```
 
 ## Compile Check
 
 ```powershell
-python -m compileall tests\test_data_coverage_regression.py scripts\run_event_pipeline_test.py scripts\run_small_batch_test.py
+python -m compileall data\trading_foundation.py tests\test_trading_foundation_adapter.py scripts\run_event_pipeline_test.py scripts\run_full_research_pipeline.py
 ```
 
 Live data runs may require local market-data environment setup, while the regression guard above is offline and deterministic.

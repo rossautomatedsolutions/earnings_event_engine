@@ -31,6 +31,7 @@ from analysis.earnings_analysis import run_full_analysis
 
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "offline_pipeline"
+TF_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "trading_foundation_historical_data"
 PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_event_pipeline_test.py"
 ANALYSIS_REQUIRED_COLUMNS = {
     "ticker",
@@ -121,6 +122,21 @@ class OfflinePipelineTest(unittest.TestCase):
         self.assertTrue(pd.notna(msft["hv20_expected_move_proxy"]))
         self.assertGreater(abs(float(aapl["implied_move"]) - float(aapl["hv20_expected_move_proxy"])), 0.01)
         self.assertGreater(abs(float(msft["implied_move"]) - float(msft["hv20_expected_move_proxy"])), 0.01)
+
+    def test_fixture_pipeline_can_consume_trading_foundation_historical_root(self) -> None:
+        result, output_dir = self._run_pipeline("--historical-data-root", str(TF_FIXTURE_ROOT))
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+
+        features = pd.read_parquet(output_dir / "features.parquet").set_index("ticker")
+        aapl = features.loc["AAPL"]
+        msft = features.loc["MSFT"]
+
+        self.assertAlmostEqual(float(aapl["implied_move"]), (6.0 + 5.8) / 106.0, places=6)
+        self.assertAlmostEqual(float(msft["implied_move"]), (6.2 + 6.0) / 205.0, places=6)
+        self.assertEqual(pd.Timestamp(aapl["option_snapshot_quote_date"]).date().isoformat(), "2025-01-30")
+        self.assertEqual(pd.Timestamp(msft["option_snapshot_quote_date"]).date().isoformat(), "2025-02-04")
+        self.assertTrue(str(aapl["option_snapshot_source_path"]).endswith("AAPL_options_snapshot_2025-01-30.csv"))
+        self.assertTrue(str(msft["option_snapshot_source_path"]).endswith("MSFT_options_snapshot_2025-02-04.csv"))
 
     def test_missing_option_data_leaves_implied_move_unavailable_without_hv_fallback(self) -> None:
         fixture_dir = self._make_fixture_dir(

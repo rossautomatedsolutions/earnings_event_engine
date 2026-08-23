@@ -1,0 +1,3 @@
+option_symbol,delta,gamma,rho,theta,vega,implied_volatility,ask_price,ask_size,bid_price,bid_size,last_trade_price,last_trade_size,last_trade_time
+MSFT250207C00206000,0.50,0.09,0.02,-0.31,0.16,0.41,10.10,16,9.90,15,10.00,6,2025-02-05T14:35:00+00:00
+MSFT250207P00206000,-0.50,0.09,-0.02,-0.30,0.16,0.42,10.10,15,9.90,14,10.00,6,2025-02-05T14:35:00+00:00
