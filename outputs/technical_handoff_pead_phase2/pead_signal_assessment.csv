@@ -1,0 +1,6 @@
+window_days,usable_events,positive_reaction_events,negative_reaction_events,status,reason
+1,1,1,0,not_defensible,Only 1 usable events at 1d; require at least 30 before considering watchlist or signal design.
+3,0,0,0,not_defensible,Only 0 usable events at 3d; require at least 30 before considering watchlist or signal design.
+5,0,0,0,not_defensible,Only 0 usable events at 5d; require at least 30 before considering watchlist or signal design.
+10,0,0,0,not_defensible,Only 0 usable events at 10d; require at least 30 before considering watchlist or signal design.
+20,0,0,0,not_defensible,Only 0 usable events at 20d; require at least 30 before considering watchlist or signal design.

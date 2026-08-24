@@ -62,7 +62,7 @@ What deterministic full-run success does **not** prove:
 - plotting support unless `--run-visuals` is explicitly enabled and succeeds
 - research efficacy, profitability, or production readiness
 
-`scripts/run_pead_research.py` remains a separate explicit research entry point. It is not part of the canonical full orchestrator because it depends on clean-event and price-panel research inputs that are adjacent to, but not guaranteed by, the core feature-artifact contract.
+`scripts/run_pead_research.py` remains a separate explicit research entry point. It is not part of the canonical full orchestrator because it depends on validated-event artifacts plus local price data that are adjacent to, but not guaranteed by, the core feature-artifact contract.
 
 ## Live vs Offline Validation
 
@@ -212,30 +212,42 @@ Live data runs may require local market-data environment setup, while the regres
 
 ## Minimal PEAD Research
 
-The repo now includes a small research-only PEAD layer that measures announcement reaction and short-horizon forward drift for validated earnings events. It operates only on artifacts that already contain the needed price columns and does not fetch data, generate recommendations, or add live execution.
+The repo now includes a bounded research-only PEAD layer that measures announcement reaction, short-horizon forward drift, conditioning buckets, and data coverage for validated earnings events. It operates on validated event artifacts plus local daily price data and does not fetch data, generate recommendations, or add live execution.
 
 Expected PEAD input contract:
 - Core columns: `event_id`, `ticker`, `event_date`, `pre_close`
 - Announcement baseline: `post_close` or `announcement_close`
-- Forward drift columns for each requested window: `forward_close_{N}d`
+- Preferred research artifact: `validated_features.parquet` when `implied_move` and `surprise_vs_implied` conditioning is needed
+- Forward drift columns for each requested window: `forward_close_{N}d`, or a local price source that can derive them
 - Optional validity filters when present: `valid_event`, `price_alignment_valid`
 
-If your validated event artifact does not already include `forward_close_{N}d`, the PEAD module now includes an offline helper that derives those columns from a local price panel with `ticker`, `date`, and `close`. The script can use that helper directly via `--prices-path`.
+If your validated event artifact does not already include `forward_close_{N}d`, the PEAD module can derive them from either:
+- `--prices-path`: local price panel with `ticker`, `date`, `close`, and optional `open` / `volume`
+- `--historical-data-root`: Trading_Foundation-style local EOD root used elsewhere in the repo
+
+Primary PEAD outputs:
+- `pead_event_returns.csv` / `.parquet`
+- `pead_horizon_summary.csv`
+- `pead_bucket_summary.csv`
+- `pead_condition_summary.csv`
+- `pead_data_coverage.csv`
+- `pead_signal_assessment.csv`
+- `pead_summary.md`
 
 Offline test command:
 
 ```powershell
-python -m unittest tests.test_data_coverage_regression tests.test_pead_research -v
+python -m unittest tests.test_data_coverage_regression tests.test_pead_research tests.test_trading_foundation_adapter tests.test_full_research_pipeline -v
 ```
 
-Research script command:
+Research script command with a validated artifact plus a local price panel:
 
 ```powershell
-python scripts\run_pead_research.py --clean-events-path data\outputs\test_batch\clean_events.parquet --output-dir outputs\research
+python scripts\run_pead_research.py --events-path outputs\main_machine_full_research\validated_features.parquet --prices-path data\outputs\local_prices.parquet --output-dir outputs\research --windows 1 3 5 10 20
 ```
 
-With a local price panel:
+Research script command with a validated artifact plus a Trading_Foundation local historical-data root:
 
 ```powershell
-python scripts\run_pead_research.py --clean-events-path data\outputs\test_batch\clean_events.parquet --prices-path data\outputs\local_prices.parquet --output-dir outputs\research
+python scripts\run_pead_research.py --events-path outputs\main_machine_full_research\validated_features.parquet --historical-data-root C:\path\to\historical_data --output-dir outputs\research --windows 1 3 5 10 20
 ```

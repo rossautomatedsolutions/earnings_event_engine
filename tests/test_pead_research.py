@@ -11,16 +11,24 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = REPO_ROOT / "src"
+TF_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "trading_foundation_historical_data"
 for path in (REPO_ROOT, SRC_PATH):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from earnings_event_engine.research import (
+    add_pre_event_context_columns,
     add_forward_close_columns,
+    assess_signal_readiness,
     assign_reaction_bucket,
+    build_pead_condition_buckets,
+    build_pead_data_coverage_report,
+    build_pead_research_dataset,
     calculate_announcement_reaction,
     calculate_forward_drift,
     summarize_pead_by_bucket,
+    summarize_pead_by_condition,
+    summarize_pead_by_window,
 )
 from scripts.run_pead_research import _read_table
 
@@ -75,6 +83,29 @@ class PeadResearchTest(unittest.TestCase):
                 "close": [108.0, 110.0, 112.0, 115.0, 95.0, 93.0, 90.0, 89.0, 100.0, 101.0],
             }
         )
+
+    def _prices_df_with_volume(self) -> pd.DataFrame:
+        aapl_dates = pd.bdate_range("2025-01-02", periods=30)
+        msft_dates = pd.bdate_range("2025-01-06", periods=30)
+        aapl = pd.DataFrame(
+            {
+                "ticker": "AAPL",
+                "date": aapl_dates,
+                "open": [100.0 + idx for idx in range(len(aapl_dates))],
+                "close": [100.5 + idx for idx in range(len(aapl_dates))],
+                "volume": [1_000_000 + idx * 10_000 for idx in range(len(aapl_dates))],
+            }
+        )
+        msft = pd.DataFrame(
+            {
+                "ticker": "MSFT",
+                "date": msft_dates,
+                "open": [200.0 + idx for idx in range(len(msft_dates))],
+                "close": [200.5 + idx for idx in range(len(msft_dates))],
+                "volume": [2_000_000 + idx * 20_000 for idx in range(len(msft_dates))],
+            }
+        )
+        return pd.concat([aapl, msft], ignore_index=True)
 
     def test_add_forward_close_columns_uses_local_price_panel(self) -> None:
         events_df = self._base_events_df().drop(columns=["forward_close_1d", "forward_close_3d"])
@@ -174,6 +205,70 @@ class PeadResearchTest(unittest.TestCase):
         self.assertAlmostEqual(float(negative_3d["mean_forward_return"]), -0.015)
         self.assertAlmostEqual(float(negative_3d["median_forward_return"]), -0.015)
         self.assertAlmostEqual(float(negative_3d["positive_rate"]), 0.0)
+
+    def test_add_pre_event_context_columns_uses_session_alignment_without_leakage(self) -> None:
+        events_df = pd.DataFrame(
+            {
+                "event_id": [1, 2],
+                "ticker": ["AAPL", "MSFT"],
+                "event_date": pd.to_datetime(["2025-02-03", "2025-02-10"]),
+                "announcement_timing": ["AMC", "BMO"],
+            }
+        )
+
+        enriched = add_pre_event_context_columns(events_df, self._prices_df_with_volume())
+
+        by_ticker = enriched.set_index("ticker")
+        self.assertEqual(pd.Timestamp(by_ticker.loc["AAPL", "pre_event_date"]).date().isoformat(), "2025-02-03")
+        self.assertEqual(pd.Timestamp(by_ticker.loc["AAPL", "post_event_date"]).date().isoformat(), "2025-02-04")
+        self.assertEqual(pd.Timestamp(by_ticker.loc["MSFT", "pre_event_date"]).date().isoformat(), "2025-02-07")
+        self.assertEqual(pd.Timestamp(by_ticker.loc["MSFT", "post_event_date"]).date().isoformat(), "2025-02-10")
+        self.assertEqual(str(by_ticker.loc["AAPL", "session_alignment_flag"]), "ok")
+        self.assertEqual(str(by_ticker.loc["MSFT", "session_alignment_flag"]), "ok")
+        self.assertFalse(pd.isna(by_ticker.loc["AAPL", "pre_20d_realized_vol"]))
+        self.assertFalse(pd.isna(by_ticker.loc["MSFT", "pre_20d_avg_volume"]))
+
+    def test_build_pead_research_dataset_supports_conditioning_and_window_summaries(self) -> None:
+        events_df = self._base_events_df().copy()
+        events_df["post_open"] = [108.0, 96.0, 100.0]
+        events_df["implied_move"] = [0.02, 0.05, 0.08]
+        events_df["surprise_vs_implied"] = [0.01, -0.02, 0.0]
+        events_df["pre_20d_realized_vol"] = [0.10, 0.20, 0.30]
+        events_df["pre_20d_avg_dollar_volume"] = [1_000_000.0, 2_000_000.0, 3_000_000.0]
+        events_df["market_cap"] = [10_000_000_000.0, 20_000_000_000.0, 30_000_000_000.0]
+        events_df["earnings_surprise_pct"] = [0.05, -0.03, 0.0]
+
+        pead_events = build_pead_research_dataset(events_df, windows=(1, 3))
+        horizon_summary = summarize_pead_by_window(pead_events, windows=(1, 3))
+        condition_summary = summarize_pead_by_condition(pead_events, windows=(1, 3))
+        coverage_df = build_pead_data_coverage_report(pead_events, windows=(1, 3))
+        signal_assessment = assess_signal_readiness(pead_events, windows=(1, 3), min_signal_events=10)
+
+        self.assertIn("gap_bucket", pead_events.columns)
+        self.assertIn("implied_move_bucket", pead_events.columns)
+        self.assertIn("realized_vs_implied_bucket", pead_events.columns)
+        self.assertIn("liquidity_bucket", pead_events.columns)
+        self.assertIn("size_bucket", pead_events.columns)
+        self.assertIn("earnings_surprise_bucket", pead_events.columns)
+        self.assertEqual(sorted(horizon_summary["window_days"].tolist()), [1, 3])
+        self.assertFalse(condition_summary.empty)
+
+        coverage_by_metric = coverage_df.set_index("metric")
+        self.assertEqual(int(coverage_by_metric.loc["reaction_bucket", "available_events"]), 3)
+        self.assertEqual(int(coverage_by_metric.loc["earnings_surprise_bucket", "available_events"]), 3)
+        self.assertTrue((signal_assessment["status"] == "not_defensible").all())
+
+    def test_coverage_report_marks_missing_optional_conditions_explicitly(self) -> None:
+        events_df = self._base_events_df().copy()
+        events_df["post_open"] = [108.0, 96.0, 100.0]
+        with_reaction = calculate_announcement_reaction(events_df)
+        with_drift = calculate_forward_drift(with_reaction, windows=(1, 3))
+        bucketed = build_pead_condition_buckets(with_drift)
+        coverage_df = build_pead_data_coverage_report(bucketed, windows=(1, 3))
+
+        coverage_by_metric = coverage_df.set_index("metric")
+        self.assertEqual(int(coverage_by_metric.loc["size_bucket", "available_events"]), 0)
+        self.assertEqual(int(coverage_by_metric.loc["earnings_surprise_bucket", "available_events"]), 0)
 
     def test_missing_required_forward_columns_fail_clearly(self) -> None:
         incomplete = self._base_events_df().drop(columns=["forward_close_3d"])
@@ -475,19 +570,71 @@ class PeadResearchTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
 
             event_returns_path = output_dir / "pead_event_returns.csv"
+            horizon_summary_path = output_dir / "pead_horizon_summary.csv"
             bucket_summary_path = output_dir / "pead_bucket_summary.csv"
+            condition_summary_path = output_dir / "pead_condition_summary.csv"
+            coverage_path = output_dir / "pead_data_coverage.csv"
+            signal_assessment_path = output_dir / "pead_signal_assessment.csv"
             summary_md_path = output_dir / "pead_summary.md"
 
             self.assertTrue(event_returns_path.exists())
+            self.assertTrue(horizon_summary_path.exists())
             self.assertTrue(bucket_summary_path.exists())
+            self.assertTrue(condition_summary_path.exists())
+            self.assertTrue(coverage_path.exists())
+            self.assertTrue(signal_assessment_path.exists())
             self.assertTrue(summary_md_path.exists())
 
             event_returns = pd.read_csv(event_returns_path)
             self.assertIn("forward_close_1d", event_returns.columns)
             self.assertIn("forward_return_1d", event_returns.columns)
+            self.assertIn("reaction_bucket", event_returns.columns)
             self.assertFalse(pd.isna(event_returns.loc[0, "forward_close_1d"]))
             self.assertAlmostEqual(float(event_returns.loc[0, "forward_close_1d"]), 112.0)
             self.assertAlmostEqual(float(event_returns.loc[0, "forward_return_1d"]), 112.0 / 110.0 - 1.0)
+
+    def test_run_pead_research_cli_supports_trading_foundation_historical_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "outputs"
+            validated_features_path = REPO_ROOT / "outputs" / "technical_handoff_full_research" / "validated_features.parquet"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_pead_research.py"),
+                    "--events-path",
+                    str(validated_features_path),
+                    "--historical-data-root",
+                    str(TF_FIXTURE_ROOT),
+                    "--output-dir",
+                    str(output_dir),
+                    "--windows",
+                    "1",
+                    "3",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+
+            event_returns = pd.read_csv(output_dir / "pead_event_returns.csv")
+            horizon_summary = pd.read_csv(output_dir / "pead_horizon_summary.csv")
+            coverage = pd.read_csv(output_dir / "pead_data_coverage.csv")
+            signal_assessment = pd.read_csv(output_dir / "pead_signal_assessment.csv")
+            summary_text = (output_dir / "pead_summary.md").read_text(encoding="utf-8")
+
+            self.assertIn("gap_return", event_returns.columns)
+            self.assertIn("timing_bucket", event_returns.columns)
+            self.assertIn("forward_return_1d", event_returns.columns)
+            self.assertIn(1, horizon_summary["window_days"].astype(int).tolist())
+            self.assertIn("forward_return_3d", event_returns.columns)
+            self.assertIn("reaction_return", coverage["metric"].astype(str).tolist())
+            self.assertIn("Signal Readiness", summary_text)
+            self.assertIn("Coverage", summary_text)
+            self.assertTrue((signal_assessment["status"] == "not_defensible").all())
 
     def test_run_pead_research_cli_fails_clearly_when_prices_csv_omits_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

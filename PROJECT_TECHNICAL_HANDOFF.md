@@ -23,7 +23,7 @@ Validation performed for this handoff:
 - Result: `95` tests passed.
 - `python scripts\run_full_research_pipeline.py --fixture-dir tests\fixtures\offline_pipeline --output-dir outputs\technical_handoff_full_research`
 - Result: canonical fixture pipeline completed successfully and emitted contract artifacts.
-- `python scripts\run_pead_research.py --clean-events-path outputs\technical_handoff_full_research\clean_events.parquet --prices-path tests\fixtures\offline_pipeline\prices.csv --output-dir outputs\technical_handoff_pead --windows 1 3`
+- `python scripts\run_pead_research.py --events-path outputs\technical_handoff_full_research\validated_features.parquet --historical-data-root tests\fixtures\trading_foundation_historical_data --output-dir outputs\technical_handoff_pead_phase2 --windows 1 3 5 10 20`
 - Result: PEAD research artifacts emitted successfully.
 
 ## 1. Executive Summary
@@ -116,7 +116,7 @@ clean_events.parquet
 | --- | --- | --- |
 | `scripts/run_event_pipeline_test.py` | Canonical event pipeline contract validation | Use for event artifact generation and validation |
 | `scripts/run_full_research_pipeline.py` | Canonical multi-stage research orchestrator | Use when downstream research should consume validated-only features |
-| `scripts/run_pead_research.py` | Minimal PEAD research run | Use for post-earnings drift analysis on validated events |
+| `scripts/run_pead_research.py` | Bounded PEAD research run | Use for post-earnings drift analysis on validated events plus local price data |
 | `notebooks/01_earnings_event_engine_demo.ipynb` | Human-readable walkthrough | Use to onboard a new agent or teammate |
 | `run_analysis.py` | Standalone historical earnings move analysis | Use only for focused historical analysis, not as the main orchestrator |
 
@@ -133,7 +133,8 @@ clean_events.parquet
 | Live prices | `yfinance.download(...)` | One row per trading day | `Open`, `Close` | None | Daily bars | Used only for live runs and ad hoc research | `scripts/run_event_pipeline_test.py`, `run_analysis.py` |
 | Macro regime file: `data/inputs/macro_regime.csv` | Optional local file | One row per event date | `event_date`, `macro_regime` | None | Daily / event-date keyed | Joined by normalized event date only | `scripts/run_event_pipeline_test.py` |
 | Historical event-time IV inputs | User-supplied DataFrame to `run_analysis.py` | One row per ticker/event date | `earnings_date`, `event_time_iv_annual` | `ticker` | Event-level | Must be true event-time IV; duplicates and invalid numeric values fail | `run_analysis.py` |
-| PEAD local price panel | Local file path passed to `scripts/run_pead_research.py` | One row per ticker/date | `ticker`, `date`, `close` | None | Daily bars | Used to derive `forward_close_Nd` columns when missing | `src/earnings_event_engine/research/pead.py` |
+| PEAD local price panel | Local file path passed to `scripts/run_pead_research.py` | One row per ticker/date | `ticker`, `date`, `close` | `open`, `volume` | Daily bars | Used to derive `forward_close_Nd` columns and pre-event context when missing | `src/earnings_event_engine/research/pead.py` |
+| PEAD Trading_Foundation local EOD root | `--historical-data-root` passed to `scripts/run_pead_research.py` | Per-ticker local EOD trees | Canonical Trading_Foundation `ticker/eod/*_1D.csv` | None | Daily bars | Used to derive forward windows and price context without a flat price panel | `data/trading_foundation.py`, `src/earnings_event_engine/research/pead.py` |
 
 ### Canonical output contracts
 
@@ -203,7 +204,11 @@ clean_events.parquet
 | `options.parquet` | `scripts/run_small_batch_test.py` | Synthetic options snapshot | Live smoke-test only |
 | `diagnostics_flags.parquet`, `coverage_summary.parquet`, `coverage_by_ticker.parquet`, `coverage_by_year.parquet` | `scripts/run_small_batch_test.py` | Extra validation/coverage outputs | Useful, not canonical full-run outputs |
 | `pead_event_returns.csv` / `.parquet` | `scripts/run_pead_research.py` | PEAD event-level reaction and drift outputs | Active research output |
+| `pead_horizon_summary.csv` | `scripts/run_pead_research.py` | Baseline PEAD summary by forward horizon | Active research output |
 | `pead_bucket_summary.csv` | `scripts/run_pead_research.py` | Bucketed PEAD summary | Active research output |
+| `pead_condition_summary.csv` | `scripts/run_pead_research.py` | Conditioned PEAD summary by bucket and horizon | Active research output |
+| `pead_data_coverage.csv` | `scripts/run_pead_research.py` | Coverage report for windows, event metrics, and condition buckets | Active research output |
+| `pead_signal_assessment.csv` | `scripts/run_pead_research.py` | Conservative watchlist / signal readiness assessment | Active research output |
 | `pead_summary.md` | `scripts/run_pead_research.py` | Human-readable PEAD summary | Active research output |
 | `data/outputs/debug_snapshots/<event_id>/...` | `src/earnings_event_engine/debug/event_snapshot.py` | Per-event debug bundles | Utility, not integrated into canonical scripts |
 
@@ -260,10 +265,14 @@ Do not treat `features.parquet` as the canonical downstream research input unles
 | Logic | Location | Purpose | Formula / behavior | Status |
 | --- | --- | --- | --- | --- |
 | Forward close derivation | `src/earnings_event_engine/research/pead.py` | Add local future closes to validated events | Uses `post_event_date` or `mapped_session` / `announcement_timing` to anchor forward windows per ticker | Validated |
+| Pre-event context derivation | `src/earnings_event_engine/research/pead.py` | Add leakage-safe volatility / liquidity context | Uses trading-session alignment plus shifted 20-day rolling features from local prices | Implemented |
 | Announcement reaction | `src/earnings_event_engine/research/pead.py` | Measure immediate event reaction | `reaction_return = post_close / pre_close - 1.0` | Validated |
+| Gap reaction | `src/earnings_event_engine/research/pead.py` | Measure immediate open reaction | `gap_return = post_open / pre_close - 1.0` when `post_open` exists | Implemented |
 | Forward drift | `src/earnings_event_engine/research/pead.py` | Measure post-announcement continuation or reversal | `forward_return_Nd = forward_close_Nd / post_close - 1.0` | Validated |
 | Reaction bucket | `src/earnings_event_engine/research/pead.py` | Bucket by sign / neutrality | Positive if `reaction_return > threshold`, negative if `< -threshold`, else neutral | Validated |
 | Bucket summary | `src/earnings_event_engine/research/pead.py` | Summarize drift by bucket and horizon | Aggregates event count, mean/median forward return, positive rate | Validated |
+| Conditional PEAD buckets | `src/earnings_event_engine/research/pead.py` | Segment by timing, implied expectations, realized-vs-implied surprise, volatility, liquidity, size, and fundamental surprise where supported | Uses sign buckets or simple quantile buckets with no aggressive optimization | Implemented |
+| Coverage and readiness reporting | `src/earnings_event_engine/research/pead.py`, `scripts/run_pead_research.py` | Document available horizons and whether a later watchlist/signal design step is even reviewable | Emits CSV summaries plus markdown packet; never emits live candidates automatically | Implemented |
 
 ### Implemented but non-canonical research helpers
 
@@ -435,11 +444,15 @@ Current readiness level: research-only.
 - `validated_features.parquet`
 - `diagnostics.parquet`
 
-`outputs/technical_handoff_pead`:
+`outputs/technical_handoff_pead_phase2`:
 
 - `pead_event_returns.csv`
 - `pead_event_returns.parquet`
+- `pead_horizon_summary.csv`
 - `pead_bucket_summary.csv`
+- `pead_condition_summary.csv`
+- `pead_data_coverage.csv`
+- `pead_signal_assessment.csv`
 - `pead_summary.md`
 
 These are validation examples, not a versioned data store. The artifact names and schemas matter more than the exact directory names.

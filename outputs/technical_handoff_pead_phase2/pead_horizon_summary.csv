@@ -1,0 +1,2 @@
+window_days,event_count,mean_forward_return,median_forward_return,positive_rate,negative_rate,mean_abs_forward_return,mean_reaction_return,mean_gap_return
+1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.0,0.0038797284190106307,0.005853658536585371,0.0034146341463414664

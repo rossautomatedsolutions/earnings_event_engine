@@ -1,0 +1,6 @@
+condition_name,condition_column,source_column,condition_bucket,window_days,event_count,mean_forward_return,median_forward_return,positive_rate,mean_reaction_return,mean_gap_return
+announcement_reaction,reaction_bucket,reaction_return,positive_reaction,1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.005853658536585371,0.0034146341463414664
+announcement_timing,timing_bucket,announcement_timing,BMO,1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.005853658536585371,0.0034146341463414664
+gap_reaction,gap_bucket,gap_return,positive_gap,1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.005853658536585371,0.0034146341463414664
+implied_expectation,implied_move_bucket,implied_move,low_expected_move,1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.005853658536585371,0.0034146341463414664
+realized_vs_implied,realized_vs_implied_bucket,surprise_vs_implied,smaller_than_implied,1,1,0.0038797284190106307,0.0038797284190106307,1.0,0.005853658536585371,0.0034146341463414664

@@ -193,7 +193,7 @@ def _resolve_eod_path(root: Path, ticker: str) -> Path | None:
 def _load_local_eod_history(root: Path, ticker: str) -> pd.DataFrame:
     path = _resolve_eod_path(root, ticker)
     if path is None or not path.exists():
-        return pd.DataFrame(columns=["open", "close"])
+        return pd.DataFrame(columns=["open", "close", "volume"])
 
     history = pd.read_csv(path)
     missing = sorted(EOD_REQUIRED_COLUMNS.difference(history.columns))
@@ -209,13 +209,14 @@ def _load_local_eod_history(root: Path, ticker: str) -> pd.DataFrame:
             "date": parsed_timestamps.dt.tz_convert(None).dt.normalize(),
             "open": pd.to_numeric(history["open"], errors="coerce"),
             "close": pd.to_numeric(history["close"], errors="coerce"),
+            "volume": pd.to_numeric(history["volume"], errors="coerce") if "volume" in history.columns else pd.NA,
         }
     )
     out = out.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last").sort_values("date")
     if out.empty:
-        return pd.DataFrame(columns=["open", "close"])
+        return pd.DataFrame(columns=["open", "close", "volume"])
 
-    indexed = out.set_index("date")[["open", "close"]]
+    indexed = out.set_index("date")[["open", "close", "volume"]]
     indexed.index = pd.to_datetime(indexed.index, errors="raise")
     return indexed.sort_index()
 
@@ -244,13 +245,17 @@ def load_trading_foundation_eod_panel(
         frames.append(frame)
 
     if not frames:
-        return pd.DataFrame(columns=["ticker", "date", "open", "close"])
+        return pd.DataFrame(columns=["ticker", "date", "open", "close", "volume"])
 
     out = pd.concat(frames, ignore_index=True)
     out["ticker"] = out["ticker"].astype("string").str.upper().str.strip()
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.normalize()
     out["open"] = pd.to_numeric(out["open"], errors="coerce")
     out["close"] = pd.to_numeric(out["close"], errors="coerce")
+    if "volume" in out.columns:
+        out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
+    else:
+        out["volume"] = pd.NA
     return out.dropna(subset=["ticker", "date"]).sort_values(["ticker", "date"]).reset_index(drop=True)
 
 

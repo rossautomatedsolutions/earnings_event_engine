@@ -1,0 +1,25 @@
+coverage_group,metric,source_column,available_events,total_events,coverage_rate,note
+dataset,input_events,event_id,2,2,1.0,Rows received by the PEAD research stage.
+dataset,research_valid_events,valid_event|price_alignment_valid,2,2,1.0,Rows passing validated-event and price-alignment gates.
+event_metric,reaction_return,reaction_return,2,2,1.0,Close-to-close announcement reaction coverage.
+event_metric,gap_return,gap_return,2,2,1.0,Pre-close to post-open gap coverage.
+event_metric,post_session_return,post_session_return,2,2,1.0,Post-open to post-close announcement-session follow-through coverage.
+window,forward_close_1d,forward_close_1d,1,2,0.5,Events with usable forward close data for this horizon.
+window,forward_return_1d,forward_return_1d,1,2,0.5,Events with usable forward drift returns for this horizon.
+window,forward_close_3d,forward_close_3d,0,2,0.0,Events with usable forward close data for this horizon.
+window,forward_return_3d,forward_return_3d,0,2,0.0,Events with usable forward drift returns for this horizon.
+window,forward_close_5d,forward_close_5d,0,2,0.0,Events with usable forward close data for this horizon.
+window,forward_return_5d,forward_return_5d,0,2,0.0,Events with usable forward drift returns for this horizon.
+window,forward_close_10d,forward_close_10d,0,2,0.0,Events with usable forward close data for this horizon.
+window,forward_return_10d,forward_return_10d,0,2,0.0,Events with usable forward drift returns for this horizon.
+window,forward_close_20d,forward_close_20d,0,2,0.0,Events with usable forward close data for this horizon.
+window,forward_return_20d,forward_return_20d,0,2,0.0,Events with usable forward drift returns for this horizon.
+condition,reaction_bucket,reaction_return,2,2,1.0,Close-to-close announcement reaction.
+condition,gap_bucket,gap_return,2,2,1.0,Pre-close to post-open announcement gap.
+condition,timing_bucket,announcement_timing,2,2,1.0,BMO vs AMC timing bucket.
+condition,implied_move_bucket,implied_move,2,2,1.0,Quantile bucket of event-time implied move.
+condition,realized_vs_implied_bucket,surprise_vs_implied,2,2,1.0,Sign of realized gap move minus implied move.
+condition,volatility_context_bucket,pre_20d_realized_vol,0,2,0.0,Pre-event realized-vol or hv20 proxy bucket.
+condition,liquidity_bucket,pre_20d_avg_dollar_volume,0,2,0.0,Pre-event average volume or dollar-volume bucket.
+condition,size_bucket,unavailable,0,2,0.0,Company size bucket when market-cap fields are present. Bucket not available on the current artifact.
+condition,earnings_surprise_bucket,unavailable,0,2,0.0,Sign bucket of fundamental earnings surprise when present. Bucket not available on the current artifact.
