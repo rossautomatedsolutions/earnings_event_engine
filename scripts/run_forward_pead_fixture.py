@@ -12,7 +12,14 @@ def run(data, horizon):
     rows = qualify(data); calendar = data['calendar']; features = []; events = {}
     for event in data['events']:
         fields(event, 'event_id subject event_date timing timing_source')
-        require(event['timing'] in ('BMO', 'AMC') and bool(event['timing_source']), 'EVENT_TIMING_UNQUALIFIED')
+        # This synthetic profile records a named evidence source, not a timestamp
+        # or a claim of historical public availability. No producer enum exists.
+        # Require canonical printable text; never stringify arbitrary JSON.
+        source = event['timing_source']
+        require(type(source) is str and bool(source) and source == source.strip()
+                and source.isprintable() and any(c.isalpha() for c in source),
+                'EVENT_TIMING_UNQUALIFIED')
+        require(event['timing'] in ('BMO', 'AMC'), 'EVENT_TIMING_UNQUALIFIED')
         require(event['event_date'] in calendar and event['subject'] in rows, 'EVENT_CALENDAR')
         i = calendar.index(event['event_date']) + (event['timing'] == 'AMC')
         require(0 < i < len(calendar), 'REACTION_SESSION_UNAVAILABLE')
