@@ -5,10 +5,11 @@ import sys
 import pandas as pd
 
 
-def run(data, horizon):
-    from forward_outcome_support import qualify, fields, require, positive, feature, package, window_status
+def run(data, horizon, *, preflight_only=False):
+    from forward_outcome_support import qualify, fields, require, positive, feature, package, window_status, identity
     from earnings_event_engine.research.pead import calculate_announcement_reaction, calculate_forward_drift, assign_reaction_bucket
     require(horizon in (5, 10, 20, 40), 'FAMILY_SCOPE')
+    identity(data)  # Existing package input-identity requirement, before reactions.
     rows = qualify(data); calendar = data['calendar']; features = []; events = {}; validated = []
     # Phase 1: complete bounded-request validation; zero scientific calls.
     for event in data['events']:
@@ -32,6 +33,9 @@ def run(data, horizon):
         require(key not in events, 'DUPLICATE_OBSERVATION')
         events[key] = None
         validated.append((event, key, t, pre, prices))
+    if preflight_only:
+        return {'schema':'forward-input-preflight/1', 'input_hash':identity(data),
+                'family':'pead', 'view':'reaction_state', 'horizon':horizon}
     # Phase 2: all event identities, timing, alignment and reaction prices are valid.
     for event, key, t, pre, prices in validated:
         frame = pd.DataFrame([{'event_id': key, 'ticker': event['subject'], 'event_date': event['event_date'],
@@ -58,11 +62,12 @@ def run(data, horizon):
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--input', required=True); p.add_argument('--output', required=True)
     p.add_argument('--horizon', type=int, required=True); p.add_argument('--alpha-scripts', required=True)
+    p.add_argument('--preflight-only', action='store_true')
     a = p.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path[:0] = [str(root/'src'), str(root), a.alpha_scripts]
     from forward_outcome_support import read_json, write_result
-    write_result(a.output, run(read_json(a.input), a.horizon))
+    write_result(a.output, run(read_json(a.input), a.horizon, preflight_only=a.preflight_only))
 
 
 if __name__ == '__main__':
