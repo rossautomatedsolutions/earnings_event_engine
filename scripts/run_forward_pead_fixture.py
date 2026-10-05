@@ -9,7 +9,8 @@ def run(data, horizon):
     from forward_outcome_support import qualify, fields, require, positive, feature, package, window_status
     from earnings_event_engine.research.pead import calculate_announcement_reaction, calculate_forward_drift, assign_reaction_bucket
     require(horizon in (5, 10, 20, 40), 'FAMILY_SCOPE')
-    rows = qualify(data); calendar = data['calendar']; features = []; events = {}
+    rows = qualify(data); calendar = data['calendar']; features = []; events = {}; validated = []
+    # Phase 1: complete bounded-request validation; zero scientific calls.
     for event in data['events']:
         fields(event, 'event_id subject event_date timing timing_source')
         # This synthetic profile records a named evidence source, not a timestamp
@@ -20,6 +21,8 @@ def run(data, horizon):
                 and source.isprintable() and any(c.isalpha() for c in source),
                 'EVENT_TIMING_UNQUALIFIED')
         require(event['timing'] in ('BMO', 'AMC'), 'EVENT_TIMING_UNQUALIFIED')
+        require(type(event['event_id']) is str and bool(event['event_id'].strip())
+                and type(event['subject']) is str and bool(event['subject']), 'EVENT_IDENTITY')
         require(event['event_date'] in calendar and event['subject'] in rows, 'EVENT_CALENDAR')
         i = calendar.index(event['event_date']) + (event['timing'] == 'AMC')
         require(0 < i < len(calendar), 'REACTION_SESSION_UNAVAILABLE')
@@ -27,6 +30,10 @@ def run(data, horizon):
         require(all(s in prices and positive(prices[s]['close']) for s in (pre, t)), 'REACTION_PRICE')
         key = event['subject'] + ':' + event['event_id']
         require(key not in events, 'DUPLICATE_OBSERVATION')
+        events[key] = None
+        validated.append((event, key, t, pre, prices))
+    # Phase 2: all event identities, timing, alignment and reaction prices are valid.
+    for event, key, t, pre, prices in validated:
         frame = pd.DataFrame([{'event_id': key, 'ticker': event['subject'], 'event_date': event['event_date'],
                                'pre_close': prices[pre]['close'], 'post_close': prices[t]['close'],
                                'valid_event': True, 'price_alignment_valid': True}])
